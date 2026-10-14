@@ -45,9 +45,16 @@ public partial class MainWindow : Window
         return audibleEnds.TryGetValue(path,out var end)?Math.Clamp(end,1,full):full;
     }
     private readonly Dictionary<string,double> audibleEnds = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string,double> decodedDurations = new(StringComparer.OrdinalIgnoreCase);
+    private double CurrentDurationSeconds() {
+        if(player.NaturalDuration.HasTimeSpan)return player.NaturalDuration.TimeSpan.TotalSeconds;
+        if(activeIndex>=0&&activeIndex<queue.Count&&decodedDurations.TryGetValue(queue[activeIndex].Path,out var duration))return duration;
+        return 0;
+    }
     private double EffectiveEndSeconds() {
-        if(activeIndex<0||activeIndex>=queue.Count||!player.NaturalDuration.HasTimeSpan)return 0;
-        var full=player.NaturalDuration.TimeSpan.TotalSeconds;
+        if(activeIndex<0||activeIndex>=queue.Count)return 0;
+        var full=CurrentDurationSeconds();
+        if(full<=0)return 0;
         return AudioEnd(queue[activeIndex].Path,full);
     }
     private bool preventQueueDuplicates = true;
@@ -75,7 +82,7 @@ public partial class MainWindow : Window
         searchDebounce.Tick += (_,_) => { searchDebounce.Stop(); RefreshLibrary(); };
         saveDebounce.Tick += (_,_)=>{saveDebounce.Stop();if(fading){pendingStateSave=true;return;}FlushState();};
         ConfigureAudioMenus();
-        Title="KYMA RADIO AUTOMATION | SOHO Professional 2.5 BETA";
+        Title="KYMA RADIO AUTOMATION | SOHO Professional 2.5.1 BETA";
         Loaded += (_,_)=>UpdateVersionLabels(this);
         player.MediaEnded += Player_MediaEnded;
         incomingPlayer.MediaEnded += Player_MediaEnded;
@@ -93,12 +100,12 @@ public partial class MainWindow : Window
                 lastFadeClock=clockNow;
                 ApplyFadeVolumes();
                 if(fadeElapsedSeconds>=outgoingFadeDuration)FinishCrossfade();
-            } else if(auto&&!stopped&&!paused&&crossfadeSeconds>0&&player.NaturalDuration.HasTimeSpan) {
+            } else if(auto&&!stopped&&!paused&&crossfadeSeconds>0&&CurrentDurationSeconds()>0) {
                 double remaining=EffectiveEndSeconds()-player.Position.TotalSeconds;
-                if(remaining>0&&remaining<=crossfadeSeconds)BeginCrossfade();
+                if(remaining<=crossfadeSeconds)BeginCrossfade();
             }
             if(pendingStateSave&&!fading){pendingStateSave=false;SaveState();}
-            UpdateFadeCountdown();UpdateWavePlayhead();Clock.Text=DateTime.Now.ToString("HH:mm:ss"); if(player.NaturalDuration.HasTimeSpan && !stopped) NowTime.Text=$"{player.Position.ToString(@"mm\:ss")} / {player.NaturalDuration.TimeSpan.ToString(@"mm\:ss")}"; else NowTime.Text="00:00"; if(!stopped && player.NaturalDuration.HasTimeSpan) PlaybackProgress.Value=Math.Min(PlaybackProgress.Maximum,player.Position.TotalSeconds); };
+            UpdateFadeCountdown();UpdateWavePlayhead();Clock.Text=DateTime.Now.ToString("HH:mm:ss"); if(CurrentDurationSeconds()>0 && !stopped) NowTime.Text=$"{player.Position.ToString(@"mm\:ss")} / {TimeSpan.FromSeconds(CurrentDurationSeconds()).ToString(@"mm\:ss")}"; else NowTime.Text="00:00"; if(!stopped && player.NaturalDuration.HasTimeSpan) PlaybackProgress.Value=Math.Min(PlaybackProgress.Maximum,player.Position.TotalSeconds); };
         player.Volume=playbackVolume; incomingPlayer.Volume=playbackVolume; foreach(var cp in cartPlayers)cp.Volume=playbackVolume; timer.Start(); LoadState(); UpdateNext(); DrawWave(NowWaveform, null); DrawWave(NextWaveform, null);
         Closing += (_,_)=> { saveDebounce.Stop();FlushState(); player.Close(); incomingPlayer.Close(); foreach(var cp in cartPlayers)cp.Close(); };
     }
@@ -106,7 +113,7 @@ public partial class MainWindow : Window
         for(int i=0;i<VisualTreeHelper.GetChildrenCount(root);i++){
             var child=VisualTreeHelper.GetChild(root,i);
             if(child is TextBlock label && label.Text.Contains("BROADCAST CONSOLE v2.2.1 BETA"))
-                label.Text=label.Text.Replace("v2.2.1 BETA","v2.5 BETA");
+                label.Text=label.Text.Replace("v2.2.1 BETA","v2.5.1 BETA");
             UpdateVersionLabels(child);
         }
     }
@@ -195,8 +202,10 @@ public partial class MainWindow : Window
     private void Next_Click(object s,RoutedEventArgs e) => NextTrack();
     private void Player_MediaOpened(object? sender,EventArgs e) {
         Dispatcher.BeginInvoke(() => {
-            if(ReferenceEquals(sender,player)&&player.NaturalDuration.HasTimeSpan)
+            if(ReferenceEquals(sender,player)&&player.NaturalDuration.HasTimeSpan){
                 PlaybackProgress.Maximum=Math.Max(1,player.NaturalDuration.TimeSpan.TotalSeconds);
+                UpdateFadeCountdown();
+            }
             if(ReferenceEquals(sender,incomingPlayer)&&preloadedPath!=null)preloadReady=true;
         });
     }
@@ -319,7 +328,7 @@ public partial class MainWindow : Window
             item.Click+=(_,_)=>{
                 silenceThresholdDb=choice;
                 foreach(MenuItem other in settings.Items)other.IsChecked=ReferenceEquals(other,item);
-                analysisGeneration++;audibleEnds.Clear();waveCache.Clear();
+                analysisGeneration++;audibleEnds.Clear();waveCache.Clear();decodedDurations.Clear();
                 if(activeIndex>=0&&activeIndex<queue.Count)DrawWave(NowWaveform,queue[activeIndex].Path);
                 UpdateNext();SaveState();StatusText.Text=$"SILENCE THRESHOLD {choice:0} dB";
             };
@@ -334,7 +343,7 @@ public partial class MainWindow : Window
         if(!auto){FadeCountdown.Text="MANUAL · ΧΩΡΙΣ ΑΥΤΟΜΑΤΗ ΜΙΞΗ";return;}
         if(crossfadeSeconds<=0){FadeCountdown.Text="CROSSFADE OFF";return;}
         if(fading){FadeCountdown.Text="MIXING · ΜΙΞΗ ΣΕ ΕΞΕΛΙΞΗ";return;}
-        if(!player.NaturalDuration.HasTimeSpan){FadeCountdown.Text="ΥΠΟΛΟΓΙΣΜΟΣ ΧΡΟΝΟΥ...";return;}
+        if(CurrentDurationSeconds()<=0){FadeCountdown.Text="ΥΠΟΛΟΓΙΣΜΟΣ ΧΡΟΝΟΥ...";return;}
         int next=activeIndex+1;
         while(next<queue.Count&&!File.Exists(queue[next].Path))next++;
         if(next>=queue.Count&&repeatPlaylist){next=0;while(next<queue.Count&&!File.Exists(queue[next].Path))next++;}
@@ -461,11 +470,12 @@ public partial class MainWindow : Window
                 }
                 if(windowCount>0&&Math.Sqrt(windowSum/windowCount)>=threshold)lastLoudSecond=pos/(double)(audio.WaveFormat.SampleRate*audio.WaveFormat.Channels);
                 if(lastLoudSecond>0.5&&audibleEnd-lastLoudSecond>=0.7)audibleEnd=lastLoudSecond;
-                return (values,audibleEnd);
+                return (values,audibleEnd,duration:audio.TotalTime.TotalSeconds);
             });
             if(generation!=analysisGeneration)return;
             audibleEnds[path]=result.audibleEnd;
-            waveCache[path]=result.values;if(waveCache.Count>64){var oldest=waveCache.Keys.First();waveCache.Remove(oldest);audibleEnds.Remove(oldest);}
+            decodedDurations[path]=result.duration;
+            waveCache[path]=result.values;if(waveCache.Count>64){var oldest=waveCache.Keys.First();waveCache.Remove(oldest);audibleEnds.Remove(oldest);decodedDurations.Remove(oldest);}
             DrawWave(NowWaveform,activeIndex>=0&&activeIndex<queue.Count?queue[activeIndex].Path:null);
             int next=activeIndex<0?0:activeIndex+1;if(next>=queue.Count&&repeatPlaylist)next=0;
             DrawWave(NextWaveform,next>=0&&next<queue.Count?queue[next].Path:null);
