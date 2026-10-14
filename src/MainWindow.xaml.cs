@@ -25,6 +25,12 @@ public partial class MainWindow : Window
     private MediaPlayer incomingPlayer = new();
     private bool fading = false;
     private double crossfadeSeconds = 5;
+    private readonly Dictionary<string,double> audibleEnds = new(StringComparer.OrdinalIgnoreCase);
+    private double EffectiveEndSeconds() {
+        if(activeIndex<0||activeIndex>=queue.Count||!player.NaturalDuration.HasTimeSpan)return 0;
+        var full=player.NaturalDuration.TimeSpan.TotalSeconds;
+        return audibleEnds.TryGetValue(queue[activeIndex].Path,out var end)?Math.Clamp(end,1,full):full;
+    }
     private bool preventQueueDuplicates = true;
     private readonly MediaPlayer[] cartPlayers = Enumerable.Range(0,9).Select(_=>new MediaPlayer()).ToArray();
     private readonly DispatcherTimer timer = new() { Interval = TimeSpan.FromMilliseconds(250) };
@@ -54,12 +60,12 @@ public partial class MainWindow : Window
         player.MediaOpened += Player_MediaOpened; incomingPlayer.MediaOpened += Player_MediaOpened;
         timer.Tick += (_,_)=> {
             if(fading) {
-                double remaining=player.NaturalDuration.HasTimeSpan?(player.NaturalDuration.TimeSpan-player.Position).TotalSeconds:0;
+                double remaining=player.NaturalDuration.HasTimeSpan?EffectiveEndSeconds()-player.Position.TotalSeconds:0;
                 double mix=Math.Clamp(remaining/Math.Max(0.1,crossfadeSeconds),0,1);
                 player.Volume=playbackVolume*Math.Cos((1-mix)*Math.PI/2);incomingPlayer.Volume=playbackVolume*Math.Sin((1-mix)*Math.PI/2);
                 if(remaining<=0.12)FinishCrossfade();
             } else if(auto&&!stopped&&!paused&&crossfadeSeconds>0&&player.NaturalDuration.HasTimeSpan) {
-                double remaining=(player.NaturalDuration.TimeSpan-player.Position).TotalSeconds;
+                double remaining=EffectiveEndSeconds()-player.Position.TotalSeconds;
                 if(remaining>0&&remaining<=crossfadeSeconds)BeginCrossfade();
             }
             UpdateFadeCountdown();UpdateWavePlayhead();Clock.Text=DateTime.Now.ToString("HH:mm:ss"); if(player.NaturalDuration.HasTimeSpan && !stopped) NowTime.Text=$"{player.Position.ToString(@"mm\:ss")} / {player.NaturalDuration.TimeSpan.ToString(@"mm\:ss")}"; else NowTime.Text="00:00"; if(!stopped && player.NaturalDuration.HasTimeSpan) PlaybackProgress.Value=Math.Min(PlaybackProgress.Maximum,player.Position.TotalSeconds); };
@@ -228,7 +234,7 @@ public partial class MainWindow : Window
         while(next<queue.Count&&!File.Exists(queue[next].Path))next++;
         if(next>=queue.Count&&repeatPlaylist){next=0;while(next<queue.Count&&!File.Exists(queue[next].Path))next++;}
         if(next>=queue.Count||next==activeIndex){FadeCountdown.Text="ΔΕΝ ΥΠΑΡΧΕΙ ΕΠΟΜΕΝΟ ΤΡΑΓΟΥΔΙ";return;}
-        double seconds=Math.Max(0,(player.NaturalDuration.TimeSpan-player.Position).TotalSeconds-crossfadeSeconds);
+        double seconds=Math.Max(0,EffectiveEndSeconds()-player.Position.TotalSeconds-crossfadeSeconds);
         var until=TimeSpan.FromSeconds(Math.Ceiling(seconds));
         FadeCountdown.Text=$"ΕΝΑΡΞΗ ΜΙΞΗΣ ΣΕ {until.Minutes:00}:{until.Seconds:00}";
     }
@@ -316,18 +322,36 @@ public partial class MainWindow : Window
         if(waveBusy.Contains(path)||waveCache.ContainsKey(path))return;
         waveBusy.Add(path);
         try {
-            var values=await Task.Run(()=>{
+            var result=await Task.Run(()=>{
                 var values=new double[105];
                 using var audio=new NAudio.Wave.AudioFileReader(path);
+                // Detect the last sustained audible window; ignore isolated noise in the tail.
+                double audibleEnd=audio.TotalTime.TotalSeconds;
+                double lastLoudSecond=0;
+                double windowSum=0;long windowCount=0;long windowStart=0;
+                long windowSamples=Math.Max(1,audio.WaveFormat.SampleRate*audio.WaveFormat.Channels/10);
+                double threshold=Math.Pow(10,-42.0/20.0);
                 long total=(long)(audio.TotalTime.TotalSeconds*audio.WaveFormat.SampleRate*audio.WaveFormat.Channels);
                 var data=new float[4096];long pos=0;int n;
                 while((n=audio.Read(data,0,data.Length))>0){
-                    for(int k=0;k<n;k+=16){int bin=(int)Math.Clamp((pos+k)*105/Math.Max(1,total),0,104);for(int j=k;j<Math.Min(k+16,n);j++)values[bin]=Math.Max(values[bin],Math.Abs(data[j]));}
+                    for(int k=0;k<n;k++){
+                        int bin=(int)Math.Clamp((pos+k)*105/Math.Max(1,total),0,104);
+                        double amplitude=Math.Abs(data[k]);
+                        values[bin]=Math.Max(values[bin],amplitude);
+                        windowSum+=data[k]*data[k];windowCount++;
+                        if(windowCount>=windowSamples){
+                            if(Math.Sqrt(windowSum/windowCount)>=threshold)lastLoudSecond=(pos+k+1)/(double)(audio.WaveFormat.SampleRate*audio.WaveFormat.Channels);
+                            windowSum=0;windowCount=0;windowStart=pos+k+1;
+                        }
+                    }
                     pos+=n;
                 }
-                return values;
+                if(windowCount>0&&Math.Sqrt(windowSum/windowCount)>=threshold)lastLoudSecond=pos/(double)(audio.WaveFormat.SampleRate*audio.WaveFormat.Channels);
+                if(lastLoudSecond>0.5&&audibleEnd-lastLoudSecond>=0.7)audibleEnd=lastLoudSecond;
+                return (values,audibleEnd);
             });
-            waveCache[path]=values;if(waveCache.Count>64)waveCache.Remove(waveCache.Keys.First());
+            audibleEnds[path]=result.audibleEnd;
+            waveCache[path]=result.values;if(waveCache.Count>64){var oldest=waveCache.Keys.First();waveCache.Remove(oldest);audibleEnds.Remove(oldest);}
             DrawWave(NowWaveform,activeIndex>=0&&activeIndex<queue.Count?queue[activeIndex].Path:null);
             int next=activeIndex<0?0:activeIndex+1;if(next>=queue.Count&&repeatPlaylist)next=0;
             DrawWave(NextWaveform,next>=0&&next<queue.Count?queue[next].Path:null);
