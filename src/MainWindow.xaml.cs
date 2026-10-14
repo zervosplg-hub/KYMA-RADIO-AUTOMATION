@@ -218,12 +218,19 @@ public partial class MainWindow : Window
     }
     private void StartAt(int index) { if(fading){incomingPlayer.Stop();incomingPlayer.Close();fading=false;player.Volume=playbackVolume;} if(index<0||index>=queue.Count)return; var t=queue[index]; if(!File.Exists(t.Path)) { StatusText.Text="MISSING FILE: "+t.Path; return; } player.Stop(); player.Open(new Uri(t.Path)); player.Play(); activeIndex=index; stopped=false; paused=false; NowTitle.Text=t.Display; NowSub.Text=t.Path; QueueList.SelectedIndex=index; history.Insert(0,$"{DateTime.Now:HH:mm:ss}   {t.Display}"); if(history.Count>100)history.RemoveAt(history.Count-1); SaveState(); StatusText.Text="PLAYING"; PlaybackProgress.Value=0; UpdateNext(); DrawWave(NowWaveform,t.Path); }
     private void UpdateFadeCountdown() {
-        if(stopped||paused||!auto||crossfadeSeconds<=0||!player.NaturalDuration.HasTimeSpan){
-            FadeCountdown.Text=stopped?"STANDBY":paused?"PAUSED":!auto?"MANUAL":"FADE OFF";
-            return;
-        }
-        double remaining=Math.Max(0,(player.NaturalDuration.TimeSpan-player.Position).TotalSeconds);
-        FadeCountdown.Text=fading?"CROSSFADE ACTIVE":remaining>crossfadeSeconds?$"FADE IN {remaining-crossfadeSeconds:0} s":"FADE NOW";
+        if(stopped){FadeCountdown.Text="ΑΝΑΜΟΝΗ";return;}
+        if(paused){FadeCountdown.Text="ΠΑΥΣΗ";return;}
+        if(!auto){FadeCountdown.Text="MANUAL · ΧΩΡΙΣ ΑΥΤΟΜΑΤΗ ΜΙΞΗ";return;}
+        if(crossfadeSeconds<=0){FadeCountdown.Text="CROSSFADE OFF";return;}
+        if(fading){FadeCountdown.Text="MIXING · ΜΙΞΗ ΣΕ ΕΞΕΛΙΞΗ";return;}
+        if(!player.NaturalDuration.HasTimeSpan){FadeCountdown.Text="ΥΠΟΛΟΓΙΣΜΟΣ ΧΡΟΝΟΥ...";return;}
+        int next=activeIndex+1;
+        while(next<queue.Count&&!File.Exists(queue[next].Path))next++;
+        if(next>=queue.Count&&repeatPlaylist){next=0;while(next<queue.Count&&!File.Exists(queue[next].Path))next++;}
+        if(next>=queue.Count||next==activeIndex){FadeCountdown.Text="ΔΕΝ ΥΠΑΡΧΕΙ ΕΠΟΜΕΝΟ ΤΡΑΓΟΥΔΙ";return;}
+        double seconds=Math.Max(0,(player.NaturalDuration.TimeSpan-player.Position).TotalSeconds-crossfadeSeconds);
+        var until=TimeSpan.FromSeconds(Math.Ceiling(seconds));
+        FadeCountdown.Text=$"ΕΝΑΡΞΗ ΜΙΞΗΣ ΣΕ {until.Minutes:00}:{until.Seconds:00}";
     }
     private void UpdateNext() {
         int next=activeIndex<0?0:activeIndex+1;
