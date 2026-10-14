@@ -31,6 +31,9 @@ public partial class MainWindow : Window
     private DateTime lastFadeClock = DateTime.UtcNow;
     private double fadeElapsedSeconds = 0;
     private bool pendingStateSave = false;
+    private string? preloadedPath;
+    private bool preloadReady;
+    private DateTime preloadStartedAt = DateTime.MinValue;
     private readonly System.Threading.SemaphoreSlim waveformWorker = new(1,1);
     private int analysisGeneration = 0;
     private double silenceThresholdDb = -42;
@@ -69,11 +72,16 @@ public partial class MainWindow : Window
         for (int i=0;i<9;i++) { var n=i; var b=new Button { Content=$"CART {i+1}", Background=new SolidColorBrush(Color.FromRgb((byte)(65+i*10),(byte)(37+i*6),(byte)(61+i*4))), Tag=i, FontSize=14, FontWeight=FontWeights.Bold, Foreground=Brushes.White, BorderBrush=new SolidColorBrush(Color.FromRgb(85,112,143)), BorderThickness=new Thickness(1), Margin=new Thickness(3), ToolTip="Αριστερό κλικ: PLAY · Δεξί κλικ: φόρτωση Cart" }; b.Click += (_,_)=> { if(Keyboard.Modifiers.HasFlag(ModifierKeys.Shift))StopSingleCart(n);else PlayCart(n); }; b.MouseRightButtonUp += (_,_)=>AssignCart(n); CartGrid.Children.Add(b); cartPlayers[n].MediaEnded += (_,_)=>Dispatcher.BeginInvoke(()=>UpdateCartPad(n,false)); }
         searchDebounce.Tick += (_,_) => { searchDebounce.Stop(); RefreshLibrary(); };
         ConfigureAudioMenus();
-        Title="KYMA RADIO AUTOMATION | SOHO Professional 2.3.1 BETA";
+        Title="KYMA RADIO AUTOMATION | SOHO Professional 2.4 BETA";
         player.MediaEnded += Player_MediaEnded;
         incomingPlayer.MediaEnded += Player_MediaEnded;
         player.MediaFailed += (_,e)=>Dispatcher.BeginInvoke(() => { StatusText.Text="PLAYBACK ERROR: " + e.ErrorException.Message; stopped=true; });
         player.MediaOpened += Player_MediaOpened; incomingPlayer.MediaOpened += Player_MediaOpened;
+        incomingPlayer.MediaFailed += (_,e)=>Dispatcher.BeginInvoke(()=>{
+            preloadReady=false;preloadedPath=null;
+            if(fading){FinishCrossfade();StatusText.Text="NEXT AUDIO ERROR";}
+            else StatusText.Text="PRELOAD ERROR: "+e.ErrorException.Message;
+        });
         timer.Tick += (_,_)=> {
             if(fading) {
                 var clockNow=DateTime.UtcNow;
@@ -171,10 +179,14 @@ public partial class MainWindow : Window
         else {player.Pause();if(fading)incomingPlayer.Pause();paused=true;StatusText.Text="PAUSED";}
     }
     private void Stop_Click(object s,RoutedEventArgs e) => StopPlayback();
-    private void StopPlayback() { incomingPlayer.Stop(); incomingPlayer.Close(); fading=false;fadeElapsedSeconds=0; player.Volume=playbackVolume; player.Stop(); stopped=true; paused=false; PlaybackProgress.Value=0; NowTime.Text="00:00"; StatusText.Text="STOPPED"; }
+    private void StopPlayback() { incomingPlayer.Stop(); incomingPlayer.Close(); preloadedPath=null;preloadReady=false;fading=false;fadeElapsedSeconds=0; player.Volume=playbackVolume; player.Stop(); stopped=true; paused=false; PlaybackProgress.Value=0; NowTime.Text="00:00"; StatusText.Text="STOPPED"; }
     private void Next_Click(object s,RoutedEventArgs e) => NextTrack();
     private void Player_MediaOpened(object? sender,EventArgs e) {
-        Dispatcher.BeginInvoke(() => {if(ReferenceEquals(sender,player)&&player.NaturalDuration.HasTimeSpan)PlaybackProgress.Maximum=Math.Max(1,player.NaturalDuration.TimeSpan.TotalSeconds);});
+        Dispatcher.BeginInvoke(() => {
+            if(ReferenceEquals(sender,player)&&player.NaturalDuration.HasTimeSpan)
+                PlaybackProgress.Maximum=Math.Max(1,player.NaturalDuration.TimeSpan.TotalSeconds);
+            if(ReferenceEquals(sender,incomingPlayer)&&preloadedPath!=null)preloadReady=true;
+        });
     }
     private void Player_MediaEnded(object? sender,EventArgs e) {
         Dispatcher.BeginInvoke(() => {
@@ -182,14 +194,36 @@ public partial class MainWindow : Window
             if(auto)NextTrack();else StopPlayback();
         });
     }
-    private void BeginCrossfade() {
-        if(fading||stopped||!auto)return;
+    private int FindUpcomingIndex() {
         int next=activeIndex+1;
         while(next<queue.Count&&!File.Exists(queue[next].Path))next++;
         if(next>=queue.Count&&repeatPlaylist){next=0;while(next<queue.Count&&!File.Exists(queue[next].Path))next++;}
-        if(next>=queue.Count||next==activeIndex)return;
+        return next<queue.Count&&next!=activeIndex?next:-1;
+    }
+    private void PreloadUpcoming() {
+        if(fading)return;
+        int next=FindUpcomingIndex();
+        string? path=next>=0?queue[next].Path:null;
+        if(path==preloadedPath)return;
+        preloadedPath=null;preloadReady=false;
         try {
-            incomingPlayer.Stop();incomingPlayer.Open(new Uri(queue[next].Path));
+            incomingPlayer.Stop();incomingPlayer.Close();
+            if(path==null)return;
+            incomingPlayer.Volume=0;
+            incomingPlayer.Open(new Uri(path));
+            preloadedPath=path;preloadStartedAt=DateTime.UtcNow;
+        } catch(Exception ex){preloadedPath=null;StatusText.Text="PRELOAD ERROR: "+ex.Message;}
+    }
+    private void BeginCrossfade() {
+        if(fading||stopped||!auto)return;
+        int next=FindUpcomingIndex();
+        if(next<0)return;
+        if(preloadedPath!=queue[next].Path){PreloadUpcoming();return;}
+        if(!preloadReady){
+            if((DateTime.UtcNow-preloadStartedAt).TotalSeconds>3)StatusText.Text="WAITING FOR NEXT AUDIO";
+            return;
+        }
+        try {
             incomingPlayer.Volume=0;incomingPlayer.Play();outgoingFadeEnd=EffectiveEndSeconds();
             fadeStartPosition=player.Position.TotalSeconds;
             outgoingFadeDuration=Math.Max(0.1,outgoingFadeEnd-fadeStartPosition);
@@ -210,9 +244,9 @@ public partial class MainWindow : Window
         if(!fading)return;
         var outgoing=player;player=incomingPlayer;incomingPlayer=outgoing;
         incomingPlayer.Stop();incomingPlayer.Close();incomingPlayer.Volume=playbackVolume;
-        player.Volume=playbackVolume;fading=false;fadeElapsedSeconds=0;PlaybackProgress.Value=0;if(player.NaturalDuration.HasTimeSpan)PlaybackProgress.Maximum=Math.Max(1,player.NaturalDuration.TimeSpan.TotalSeconds);
+        player.Volume=playbackVolume;fading=false;fadeElapsedSeconds=0;preloadedPath=null;preloadReady=false;PlaybackProgress.Value=0;if(player.NaturalDuration.HasTimeSpan)PlaybackProgress.Maximum=Math.Max(1,player.NaturalDuration.TimeSpan.TotalSeconds);
         DrawWave(NowWaveform,activeIndex>=0&&activeIndex<queue.Count?queue[activeIndex].Path:null);
-        StatusText.Text="PLAYING";
+        StatusText.Text="PLAYING";UpdateNext();
     }
     private void NextTrack() {
         if(movingNext)return; movingNext=true;
@@ -253,7 +287,7 @@ public partial class MainWindow : Window
         try{File.WriteAllLines(d.FileName,new[]{"Entry"}.Concat(history.Select(h=>"\""+h.Replace("\"","\"\"")+"\"")),System.Text.Encoding.UTF8);StatusText.Text="HISTORY EXPORTED";}
         catch(Exception ex){StatusText.Text="EXPORT ERROR: "+ex.Message;}
     }
-    private void StartAt(int index) { if(fading){incomingPlayer.Stop();incomingPlayer.Close();fading=false;fadeElapsedSeconds=0;player.Volume=playbackVolume;} if(index<0||index>=queue.Count)return; var t=queue[index]; if(!File.Exists(t.Path)) { StatusText.Text="MISSING FILE: "+t.Path; return; } player.Stop(); player.Open(new Uri(t.Path)); player.Play(); activeIndex=index; stopped=false; paused=false; NowTitle.Text=t.Display; NowSub.Text=t.Path; QueueList.SelectedIndex=index; history.Insert(0,$"{DateTime.Now:HH:mm:ss}   {t.Display}"); if(history.Count>100)history.RemoveAt(history.Count-1); SaveState(); StatusText.Text="PLAYING"; PlaybackProgress.Value=0; UpdateNext(); DrawWave(NowWaveform,t.Path); }
+    private void StartAt(int index) { if(fading){incomingPlayer.Stop();incomingPlayer.Close();fading=false;fadeElapsedSeconds=0;player.Volume=playbackVolume;}preloadedPath=null;preloadReady=false; if(index<0||index>=queue.Count)return; var t=queue[index]; if(!File.Exists(t.Path)) { StatusText.Text="MISSING FILE: "+t.Path; return; } player.Stop(); player.Open(new Uri(t.Path)); player.Play(); activeIndex=index; stopped=false; paused=false; NowTitle.Text=t.Display; NowSub.Text=t.Path; QueueList.SelectedIndex=index; history.Insert(0,$"{DateTime.Now:HH:mm:ss}   {t.Display}"); if(history.Count>100)history.RemoveAt(history.Count-1); SaveState(); StatusText.Text="PLAYING"; PlaybackProgress.Value=0; UpdateNext(); DrawWave(NowWaveform,t.Path); }
     private void ConfigureAudioMenus() {
         var queueMenu=new ContextMenu();
         var setOut=new MenuItem{Header="Mix Out → τρέχουσα θέση αναπαραγωγής"};
@@ -304,6 +338,7 @@ public partial class MainWindow : Window
         NextTitle.Text=nextPath!=null?queue[next].Display:"—";
         QueueCount.Text=$"Playlist: {queue.Count}  |  Library: {library.Count}";
         DrawWave(NextWaveform,nextPath);
+        PreloadUpcoming();
     }
     private void QueueList_SelectionChanged(object s,SelectionChangedEventArgs e) { }
     private void ClearQueue_Click(object s,RoutedEventArgs e) {
