@@ -29,6 +29,8 @@ public partial class MainWindow : Window
     private bool stopped = true;
     private bool movingNext = false;
     private bool paused = false;
+    private bool repeatPlaylist = false;
+    private bool libraryDirty = false;
     private readonly Random random = new();
     private double playbackVolume = 0.85;
     private readonly string[] audioExtensions = { ".mp3", ".wav", ".wma", ".aac", ".m4a", ".flac" };
@@ -45,7 +47,12 @@ public partial class MainWindow : Window
         player.Volume=playbackVolume; foreach(var cp in cartPlayers)cp.Volume=playbackVolume; timer.Start(); LoadState(); UpdateNext(); DrawWave(NowWaveform, null); DrawWave(NextWaveform, null);
         Closing += (_,_)=> { SaveState(); player.Close(); foreach(var cp in cartPlayers)cp.Close(); };
     }
-    private void RefreshLibrary() { var term=SearchBox.Text.Trim(); filtered.Clear(); foreach(var t in library.Where(t=>t.Display.Contains(term,StringComparison.CurrentCultureIgnoreCase) || t.Path.Contains(term,StringComparison.CurrentCultureIgnoreCase))) filtered.Add(t); }
+    private void RefreshLibrary() {
+        var term=SearchBox.Text.Trim();
+        var matches=string.IsNullOrWhiteSpace(term)?library.ToList():library.Where(t=>t.Display.Contains(term,StringComparison.CurrentCultureIgnoreCase)||t.Path.Contains(term,StringComparison.CurrentCultureIgnoreCase)).ToList();
+        filtered.Clear(); foreach(var t in matches)filtered.Add(t);
+        libraryDirty=false;
+    }
     private void Import_Click(object s,RoutedEventArgs e) { var d=new OpenFileDialog { Filter="Audio files|*.mp3;*.wav;*.wma;*.aac;*.m4a;*.flac|All files|*.*", Multiselect=true }; if(d.ShowDialog()==true) { var known=new HashSet<string>(library.Select(x=>x.Path),StringComparer.OrdinalIgnoreCase); foreach(var p in d.FileNames) if(known.Add(p)) library.Add(new Track{Path=p}); RefreshLibrary(); SaveState(); StatusText.Text=$"LIBRARY: {library.Count} tracks"; } }
     private void ImportFolder_Click(object s,RoutedEventArgs e) {
         var dialog=new OpenFolderDialog { Title="Επιλογή φακέλου μουσικής", Multiselect=false };
@@ -90,9 +97,54 @@ public partial class MainWindow : Window
     private void Stop_Click(object s,RoutedEventArgs e) => StopPlayback();
     private void StopPlayback() { player.Stop(); stopped=true; paused=false; PlaybackProgress.Value=0; NowTime.Text="00:00"; StatusText.Text="STOPPED"; }
     private void Next_Click(object s,RoutedEventArgs e) => NextTrack();
-    private void NextTrack() { if(movingNext)return; movingNext=true; try { if(queue.Count==0) { StopPlayback(); return; } var next=activeIndex+1; while(next<queue.Count && !File.Exists(queue[next].Path))next++; if(next>=queue.Count) { StopPlayback(); StatusText.Text="END OF PLAYLIST"; return; } StartAt(next); } finally { movingNext=false; } }
+    private void NextTrack() {
+        if(movingNext)return; movingNext=true;
+        try {
+            if(queue.Count==0) { StopPlayback(); return; }
+            int next=activeIndex+1;
+            while(next<queue.Count && !File.Exists(queue[next].Path))next++;
+            if(next>=queue.Count && repeatPlaylist) { next=0; while(next<queue.Count&&!File.Exists(queue[next].Path))next++; }
+            if(next>=queue.Count) { StopPlayback(); StatusText.Text="END OF PLAYLIST"; return; }
+            StartAt(next);
+        } finally { movingNext=false; }
+    }
+    private void Repeat_Click(object s,RoutedEventArgs e) {
+        repeatPlaylist=!repeatPlaylist; RefreshRepeatButton(); UpdateNext(); SaveState();
+    }
+    private void RefreshRepeatButton() {
+        RepeatButton.Content=repeatPlaylist?"REPEAT ON":"REPEAT OFF";
+        RepeatButton.Background=new SolidColorBrush(repeatPlaylist?Color.FromRgb(25,118,52):Color.FromRgb(70,74,90));
+    }
+    private void RemoveMissing_Click(object s,RoutedEventArgs e) {
+        int removed=0;
+        for(int i=library.Count-1;i>=0;i--)if(!File.Exists(library[i].Path)){library.RemoveAt(i);removed++;}
+        for(int i=queue.Count-1;i>=0;i--)if(!File.Exists(queue[i].Path)){
+            if(i==activeIndex){StopPlayback();activeIndex=-1;}
+            else if(i<activeIndex)activeIndex--;
+            queue.RemoveAt(i);
+        }
+        RefreshLibrary();UpdateNext();SaveState();StatusText.Text=$"MISSING FILES REMOVED: {removed}";
+    }
+    private void ClearHistory_Click(object s,RoutedEventArgs e) {
+        if(history.Count==0)return;
+        if(MessageBox.Show("Να διαγραφεί το ιστορικό αναπαραγωγής;","KYMA",MessageBoxButton.YesNo,MessageBoxImage.Question)!=MessageBoxResult.Yes)return;
+        history.Clear();SaveState();StatusText.Text="HISTORY CLEARED";
+    }
+    private void ExportHistory_Click(object s,RoutedEventArgs e) {
+        var d=new SaveFileDialog{Filter="CSV file|*.csv",FileName="KYMA_History.csv"};
+        if(d.ShowDialog()!=true)return;
+        try{File.WriteAllLines(d.FileName,new[]{"Entry"}.Concat(history.Select(h=>"\""+h.Replace("\"","\"\"")+"\"")),System.Text.Encoding.UTF8);StatusText.Text="HISTORY EXPORTED";}
+        catch(Exception ex){StatusText.Text="EXPORT ERROR: "+ex.Message;}
+    }
     private void StartAt(int index) { if(index<0||index>=queue.Count)return; var t=queue[index]; if(!File.Exists(t.Path)) { StatusText.Text="MISSING FILE: "+t.Path; return; } player.Stop(); player.Open(new Uri(t.Path)); player.Play(); activeIndex=index; stopped=false; paused=false; NowTitle.Text=t.Display; NowSub.Text=t.Path; QueueList.SelectedIndex=index; history.Insert(0,$"{DateTime.Now:HH:mm:ss}   {t.Display}"); if(history.Count>100)history.RemoveAt(history.Count-1); SaveState(); StatusText.Text="PLAYING"; PlaybackProgress.Value=0; UpdateNext(); DrawWave(NowWaveform,t.Path); }
-    private void UpdateNext() { NextTitle.Text=activeIndex+1>=0&&activeIndex+1<queue.Count?queue[activeIndex+1].Display:queue.Count>0&&activeIndex<0?queue[0].Display:"—"; QueueCount.Text=$"Playlist: {queue.Count}  |  Library: {library.Count}"; DrawWave(NextWaveform, activeIndex+1<queue.Count && activeIndex+1>=0 ? queue[activeIndex+1].Path : activeIndex<0 && queue.Count>0 ? queue[0].Path : null); }
+    private void UpdateNext() {
+        int next=activeIndex<0?0:activeIndex+1;
+        if(next>=queue.Count && repeatPlaylist)next=0;
+        string? nextPath=next>=0&&next<queue.Count?queue[next].Path:null;
+        NextTitle.Text=nextPath!=null?queue[next].Display:"—";
+        QueueCount.Text=$"Playlist: {queue.Count}  |  Library: {library.Count}";
+        DrawWave(NextWaveform,nextPath);
+    }
     private void QueueList_SelectionChanged(object s,SelectionChangedEventArgs e) { }
     private void ClearQueue_Click(object s,RoutedEventArgs e) {
         if(queue.Count==0)return;
@@ -144,10 +196,10 @@ public partial class MainWindow : Window
     }
     private void StopCart_Click(object s,RoutedEventArgs e) { for(int i=0;i<cartPlayers.Length;i++){cartPlayers[i].Stop();UpdateCartPad(i,false);} StatusText.Text="ALL CARTS STOPPED"; }
     private void Save_Click(object s,RoutedEventArgs e) { SaveState(); StatusText.Text="LIBRARY SAVED"; }
-    private sealed class SavedState { public List<string> Library {get;set;}=new(); public List<string> Queue {get;set;}=new(); public string?[] Carts {get;set;}=new string?[9]; public bool Auto {get;set;}=false; public double Volume {get;set;}=85; public List<string> History {get;set;}=new(); }
-    private void SaveState() { try { Directory.CreateDirectory(System.IO.Path.GetDirectoryName(stateFile)!); File.WriteAllText(stateFile,JsonSerializer.Serialize(new SavedState { Library=library.Select(t=>t.Path).ToList(),Queue=queue.Select(t=>t.Path).ToList(),Carts=carts,Auto=auto,Volume=playbackVolume*100,History=history.ToList() })); } catch(Exception ex) { StatusText.Text="SAVE ERROR: "+ex.Message; } }
-    private void LoadState() { try { if(!File.Exists(stateFile))return; var state=JsonSerializer.Deserialize<SavedState>(File.ReadAllText(stateFile)); if(state==null)return; auto=state.Auto; RefreshAutoButton(); playbackVolume=Math.Clamp(state.Volume/100.0,0,1); player.Volume=playbackVolume; foreach(var cp in cartPlayers)cp.Volume=playbackVolume; VolumeSlider.Value=playbackVolume*100; foreach(var entry in state.History??new List<string>()) { if(history.Count>=100)break; history.Add(entry); } foreach(var p in state.Library.Where(File.Exists))library.Add(new Track{Path=p}); foreach(var p in state.Queue.Where(File.Exists))queue.Add(new Track{Path=p}); for(int i=0;i<Math.Min(9,(state.Carts?.Length ?? 0));i++) { if(state.Carts![i] is string p && File.Exists(p)) { carts[i]=p; UpdateCartPad(i,false); } } RefreshLibrary(); UpdateNext(); } catch(Exception ex) { StatusText.Text="LOAD ERROR: "+ex.Message; } }
-    private void Window_KeyDown(object sender,KeyEventArgs e) { if(Keyboard.FocusedElement is TextBox)return; if(e.Key==Key.F5) { Play_Click(sender,new RoutedEventArgs()); e.Handled=true; } else if(e.Key==Key.F6) { Pause_Click(sender,new RoutedEventArgs()); e.Handled=true; } else if(e.Key==Key.F7) { Stop_Click(sender,new RoutedEventArgs()); e.Handled=true; } else if(e.Key==Key.F8) { Next_Click(sender,new RoutedEventArgs()); e.Handled=true; } else if(e.Key==Key.F9) { Auto_Click(sender,new RoutedEventArgs()); e.Handled=true; } else if(e.Key>=Key.D1 && e.Key<=Key.D9) { PlayCart((int)e.Key-(int)Key.D1); e.Handled=true; } else if(e.Key>=Key.NumPad1 && e.Key<=Key.NumPad9) { PlayCart((int)e.Key-(int)Key.NumPad1); e.Handled=true; } }
+    private sealed class SavedState { public List<string> Library {get;set;}=new(); public List<string> Queue {get;set;}=new(); public string?[] Carts {get;set;}=new string?[9]; public bool Auto {get;set;}=false; public bool Repeat {get;set;}=false; public double Volume {get;set;}=85; public List<string> History {get;set;}=new(); }
+    private void SaveState() { try { Directory.CreateDirectory(System.IO.Path.GetDirectoryName(stateFile)!); File.WriteAllText(stateFile,JsonSerializer.Serialize(new SavedState { Library=library.Select(t=>t.Path).ToList(),Queue=queue.Select(t=>t.Path).ToList(),Carts=carts,Auto=auto,Repeat=repeatPlaylist,Volume=playbackVolume*100,History=history.ToList() })); } catch(Exception ex) { StatusText.Text="SAVE ERROR: "+ex.Message; } }
+    private void LoadState() { try { if(!File.Exists(stateFile))return; var state=JsonSerializer.Deserialize<SavedState>(File.ReadAllText(stateFile)); if(state==null)return; auto=state.Auto; RefreshAutoButton(); repeatPlaylist=state.Repeat; RefreshRepeatButton(); playbackVolume=Math.Clamp(state.Volume/100.0,0,1); player.Volume=playbackVolume; foreach(var cp in cartPlayers)cp.Volume=playbackVolume; VolumeSlider.Value=playbackVolume*100; foreach(var entry in state.History??new List<string>()) { if(history.Count>=100)break; history.Add(entry); } foreach(var p in state.Library.Where(File.Exists))library.Add(new Track{Path=p}); foreach(var p in state.Queue.Where(File.Exists))queue.Add(new Track{Path=p}); for(int i=0;i<Math.Min(9,(state.Carts?.Length ?? 0));i++) { if(state.Carts![i] is string p && File.Exists(p)) { carts[i]=p; UpdateCartPad(i,false); } } RefreshLibrary(); UpdateNext(); } catch(Exception ex) { StatusText.Text="LOAD ERROR: "+ex.Message; } }
+    private void Window_KeyDown(object sender,KeyEventArgs e) { if(Keyboard.FocusedElement is TextBox)return; if(e.Key==Key.F5) { Play_Click(sender,new RoutedEventArgs()); e.Handled=true; } else if(e.Key==Key.F6) { Pause_Click(sender,new RoutedEventArgs()); e.Handled=true; } else if(e.Key==Key.F7) { Stop_Click(sender,new RoutedEventArgs()); e.Handled=true; } else if(e.Key==Key.F8) { Next_Click(sender,new RoutedEventArgs()); e.Handled=true; } else if(e.Key==Key.F9) { Auto_Click(sender,new RoutedEventArgs()); e.Handled=true; } else if(e.Key==Key.F10) { Repeat_Click(sender,new RoutedEventArgs()); e.Handled=true; } else if(e.Key>=Key.D1 && e.Key<=Key.D9) { PlayCart((int)e.Key-(int)Key.D1); e.Handled=true; } else if(e.Key>=Key.NumPad1 && e.Key<=Key.NumPad9) { PlayCart((int)e.Key-(int)Key.NumPad1); e.Handled=true; } }
     private void Waveform_SizeChanged(object sender,SizeChangedEventArgs e) { if(sender==NowWaveform) DrawWave(NowWaveform,activeIndex>=0&&activeIndex<queue.Count?queue[activeIndex].Path:null); else DrawWave(NextWaveform,activeIndex+1<queue.Count&&activeIndex+1>=0?queue[activeIndex+1].Path:null); }
     private void DrawWave(Canvas canvas,string? path) {
         canvas.Children.Clear(); double width=canvas.ActualWidth; if(width<10)return;
