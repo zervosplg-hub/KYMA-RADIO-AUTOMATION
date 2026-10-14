@@ -25,6 +25,7 @@ public partial class MainWindow : Window
     private MediaPlayer incomingPlayer = new();
     private bool fading = false;
     private double crossfadeSeconds = 5;
+    private double outgoingFadeEnd = 0;
     private readonly Dictionary<string,double> audibleEnds = new(StringComparer.OrdinalIgnoreCase);
     private double EffectiveEndSeconds() {
         if(activeIndex<0||activeIndex>=queue.Count||!player.NaturalDuration.HasTimeSpan)return 0;
@@ -60,7 +61,7 @@ public partial class MainWindow : Window
         player.MediaOpened += Player_MediaOpened; incomingPlayer.MediaOpened += Player_MediaOpened;
         timer.Tick += (_,_)=> {
             if(fading) {
-                double remaining=player.NaturalDuration.HasTimeSpan?EffectiveEndSeconds()-player.Position.TotalSeconds:0;
+                double remaining=player.NaturalDuration.HasTimeSpan?outgoingFadeEnd-player.Position.TotalSeconds:0;
                 double mix=Math.Clamp(remaining/Math.Max(0.1,crossfadeSeconds),0,1);
                 player.Volume=playbackVolume*Math.Cos((1-mix)*Math.PI/2);incomingPlayer.Volume=playbackVolume*Math.Sin((1-mix)*Math.PI/2);
                 if(remaining<=0.12)FinishCrossfade();
@@ -168,7 +169,7 @@ public partial class MainWindow : Window
         if(next>=queue.Count||next==activeIndex)return;
         try {
             incomingPlayer.Stop();incomingPlayer.Open(new Uri(queue[next].Path));
-            incomingPlayer.Volume=0;incomingPlayer.Play();fading=true;
+            incomingPlayer.Volume=0;incomingPlayer.Play();outgoingFadeEnd=EffectiveEndSeconds();fading=true;
             activeIndex=next;NowTitle.Text=queue[next].Display;NowSub.Text=queue[next].Path;
             QueueList.SelectedIndex=next;history.Insert(0,$"{DateTime.Now:HH:mm:ss}   {queue[next].Display}");
             if(history.Count>100)history.RemoveAt(history.Count-1);
