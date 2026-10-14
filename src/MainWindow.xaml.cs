@@ -283,10 +283,33 @@ public partial class MainWindow : Window
         if(sender==NowWaveform)DrawWave(NowWaveform,activeIndex>=0&&activeIndex<queue.Count?queue[activeIndex].Path:null);
         else {int next=activeIndex<0?0:activeIndex+1;if(next>=queue.Count&&repeatPlaylist)next=0;DrawWave(NextWaveform,next>=0&&next<queue.Count?queue[next].Path:null);}
     }
+    private readonly Dictionary<string,double[]> waveCache=new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> waveBusy=new(StringComparer.OrdinalIgnoreCase);
+    private async void DecodeWave(string path) {
+        if(waveBusy.Contains(path)||waveCache.ContainsKey(path))return;
+        waveBusy.Add(path);
+        try {
+            var values=await Task.Run(()=>{
+                var values=new double[105];
+                using var audio=new NAudio.Wave.AudioFileReader(path);
+                long total=(long)(audio.TotalTime.TotalSeconds*audio.WaveFormat.AverageBytesPerSecond/4);
+                var data=new float[4096];long pos=0;int n;
+                while((n=audio.Read(data,0,data.Length))>0){
+                    for(int k=0;k<n;k+=16){int bin=(int)Math.Clamp((pos+k)*105/Math.Max(1,total),0,104);for(int j=k;j<Math.Min(k+16,n);j++)values[bin]=Math.Max(values[bin],Math.Abs(data[j]));}
+                    pos+=n;
+                }
+                return values;
+            });
+            waveCache[path]=values;if(waveCache.Count>64)waveCache.Remove(waveCache.Keys.First());
+            DrawWave(NowWaveform,activeIndex>=0&&activeIndex<queue.Count?queue[activeIndex].Path:null);
+            int next=activeIndex<0?0:activeIndex+1;if(next>=queue.Count&&repeatPlaylist)next=0;
+            DrawWave(NextWaveform,next>=0&&next<queue.Count?queue[next].Path:null);
+        }catch(Exception ex){StatusText.Text="WAVE ERROR: "+ex.Message;}finally{waveBusy.Remove(path);}
+    }
     private void DrawWave(Canvas canvas,string? path) {
         canvas.Children.Clear(); double width=canvas.ActualWidth; if(width<10)return;
-        const int bars=105; var heights=new double[bars];
-        if(path!=null && File.Exists(path) && System.IO.Path.GetExtension(path).Equals(".wav",StringComparison.OrdinalIgnoreCase)) {
+        const int bars=105; var heights=new double[bars]; if(path!=null&&File.Exists(path)){if(waveCache.TryGetValue(path,out var peaks))Array.Copy(peaks,heights,bars);else if(!waveBusy.Contains(path))DecodeWave(path);}
+        if(false) {
             try { using var f=File.OpenRead(path); using var r=new BinaryReader(f); if(new string(r.ReadChars(4))=="RIFF") { f.Position=8; if(new string(r.ReadChars(4))=="WAVE") { long dataStart=-1; int dataLength=0; int bits=0; int channels=0; while(f.Position+8<=f.Length) { var chunk=new string(r.ReadChars(4)); int size=r.ReadInt32(); long end=f.Position+size; if(size<0 || end>f.Length)break; if(chunk=="fmt " && size>=16) { int format=r.ReadInt16(); channels=r.ReadInt16(); r.ReadInt32(); r.ReadInt32(); r.ReadInt16(); bits=r.ReadInt16(); if(format!=1)bits=0; } if(chunk=="data") { dataStart=f.Position; dataLength=size; } f.Position=end+(size%2); } if(dataStart>=0 && bits==16 && channels>0) { int frameSize=channels*2; for(int i=0;i<bars;i++) { long pos=dataStart+(long)((i+0.5)/bars*dataLength/frameSize)*frameSize; f.Position=Math.Min(dataStart+dataLength-frameSize, pos); double peak=0; for(int j=0;j<128 && f.Position+frameSize<=dataStart+dataLength;j++) { short sample=r.ReadInt16(); peak=Math.Max(peak,Math.Abs((double)sample/32768)); f.Position+=(channels-1)*2; } heights[i]=Math.Clamp(peak,0.04,1); } } } } } catch { }
         }
         for(int i=0;i<bars;i++) { double h=(heights[i]>0?heights[i]:0.04)*Math.Max(10,canvas.ActualHeight-6); var rect=new Rectangle { Width=Math.Max(1,width/bars-1),Height=h,Fill=new SolidColorBrush(i<bars/2?Color.FromRgb(43,191,218):Color.FromRgb(84,213,145)),Opacity=0.9 }; Canvas.SetLeft(rect,i*width/bars); Canvas.SetTop(rect,(canvas.ActualHeight-h)/2); canvas.Children.Add(rect); }
