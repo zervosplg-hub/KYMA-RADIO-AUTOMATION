@@ -292,7 +292,7 @@ public partial class MainWindow : Window
             var values=await Task.Run(()=>{
                 var values=new double[105];
                 using var audio=new NAudio.Wave.AudioFileReader(path);
-                long total=(long)(audio.TotalTime.TotalSeconds*audio.WaveFormat.AverageBytesPerSecond/4);
+                long total=(long)(audio.TotalTime.TotalSeconds*audio.WaveFormat.SampleRate*audio.WaveFormat.Channels);
                 var data=new float[4096];long pos=0;int n;
                 while((n=audio.Read(data,0,data.Length))>0){
                     for(int k=0;k<n;k+=16){int bin=(int)Math.Clamp((pos+k)*105/Math.Max(1,total),0,104);for(int j=k;j<Math.Min(k+16,n);j++)values[bin]=Math.Max(values[bin],Math.Abs(data[j]));}
@@ -304,7 +304,7 @@ public partial class MainWindow : Window
             DrawWave(NowWaveform,activeIndex>=0&&activeIndex<queue.Count?queue[activeIndex].Path:null);
             int next=activeIndex<0?0:activeIndex+1;if(next>=queue.Count&&repeatPlaylist)next=0;
             DrawWave(NextWaveform,next>=0&&next<queue.Count?queue[next].Path:null);
-        }catch(Exception ex){StatusText.Text="WAVE ERROR: "+ex.Message;}finally{waveBusy.Remove(path);}
+        }catch(Exception ex){waveCache[path]=new double[105];StatusText.Text="WAVE ERROR: "+ex.Message;}finally{waveBusy.Remove(path);}
     }
     private void DrawWave(Canvas canvas,string? path) {
         canvas.Children.Clear(); double width=canvas.ActualWidth; if(width<10)return;
