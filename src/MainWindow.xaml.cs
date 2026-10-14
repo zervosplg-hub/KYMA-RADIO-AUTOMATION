@@ -26,6 +26,9 @@ public partial class MainWindow : Window
     private bool fading = false;
     private double crossfadeSeconds = 5;
     private double outgoingFadeEnd = 0;
+    private double fadeStartPosition = 0;
+    private double outgoingFadeDuration = 5;
+    private int analysisGeneration = 0;
     private double silenceThresholdDb = -42;
     private readonly Dictionary<string,double> manualMixOut = new(StringComparer.OrdinalIgnoreCase);
     private double AudioEnd(string path,double full) {
@@ -62,16 +65,15 @@ public partial class MainWindow : Window
         for (int i=0;i<9;i++) { var n=i; var b=new Button { Content=$"CART {i+1}", Background=new SolidColorBrush(Color.FromRgb((byte)(65+i*10),(byte)(37+i*6),(byte)(61+i*4))), Tag=i, FontSize=14, FontWeight=FontWeights.Bold, Foreground=Brushes.White, BorderBrush=new SolidColorBrush(Color.FromRgb(85,112,143)), BorderThickness=new Thickness(1), Margin=new Thickness(3), ToolTip="Αριστερό κλικ: PLAY · Δεξί κλικ: φόρτωση Cart" }; b.Click += (_,_)=> { if(Keyboard.Modifiers.HasFlag(ModifierKeys.Shift))StopSingleCart(n);else PlayCart(n); }; b.MouseRightButtonUp += (_,_)=>AssignCart(n); CartGrid.Children.Add(b); cartPlayers[n].MediaEnded += (_,_)=>Dispatcher.BeginInvoke(()=>UpdateCartPad(n,false)); }
         searchDebounce.Tick += (_,_) => { searchDebounce.Stop(); RefreshLibrary(); };
         ConfigureAudioMenus();
+        Title="KYMA RADIO AUTOMATION | SOHO Professional 2.3 BETA";
         player.MediaEnded += Player_MediaEnded;
         incomingPlayer.MediaEnded += Player_MediaEnded;
         player.MediaFailed += (_,e)=>Dispatcher.BeginInvoke(() => { StatusText.Text="PLAYBACK ERROR: " + e.ErrorException.Message; stopped=true; });
         player.MediaOpened += Player_MediaOpened; incomingPlayer.MediaOpened += Player_MediaOpened;
         timer.Tick += (_,_)=> {
             if(fading) {
-                double remaining=player.NaturalDuration.HasTimeSpan?outgoingFadeEnd-player.Position.TotalSeconds:0;
-                double mix=Math.Clamp(remaining/Math.Max(0.1,crossfadeSeconds),0,1);
-                player.Volume=playbackVolume*Math.Cos((1-mix)*Math.PI/2);incomingPlayer.Volume=playbackVolume*Math.Sin((1-mix)*Math.PI/2);
-                if(remaining<=0.12)FinishCrossfade();
+                ApplyFadeVolumes();
+                if(player.Position.TotalSeconds>=outgoingFadeEnd-0.12)FinishCrossfade();
             } else if(auto&&!stopped&&!paused&&crossfadeSeconds>0&&player.NaturalDuration.HasTimeSpan) {
                 double remaining=EffectiveEndSeconds()-player.Position.TotalSeconds;
                 if(remaining>0&&remaining<=crossfadeSeconds)BeginCrossfade();
@@ -154,8 +156,12 @@ public partial class MainWindow : Window
     }
     private void LibraryList_DoubleClick(object s,MouseButtonEventArgs e) => AddToQueue_Click(s,new RoutedEventArgs());
     private void SearchBox_TextChanged(object s,TextChangedEventArgs e) { if(searchDebounce==null)return; searchDebounce.Stop(); searchDebounce.Start(); }
-    private void Play_Click(object s,RoutedEventArgs e) { if(!stopped) { player.Play(); paused=false; StatusText.Text="PLAYING"; return; } if(queue.Count>0) { int i=activeIndex>=0?activeIndex:0; while(i<queue.Count && !File.Exists(queue[i].Path))i++; if(i<queue.Count)StartAt(i); else StatusText.Text="NO AVAILABLE AUDIO FILES"; } }
-    private void Pause_Click(object s,RoutedEventArgs e) { if(stopped)return; if(fading)FinishCrossfade(); if(paused) { player.Play(); paused=false; StatusText.Text="PLAYING"; } else { player.Pause(); paused=true; StatusText.Text="PAUSED"; } }
+    private void Play_Click(object s,RoutedEventArgs e) { if(!stopped) { player.Play();if(fading)incomingPlayer.Play(); paused=false; StatusText.Text="PLAYING"; return; } if(queue.Count>0) { int i=activeIndex>=0?activeIndex:0; while(i<queue.Count && !File.Exists(queue[i].Path))i++; if(i<queue.Count)StartAt(i); else StatusText.Text="NO AVAILABLE AUDIO FILES"; } }
+    private void Pause_Click(object s,RoutedEventArgs e) {
+        if(stopped)return;
+        if(paused){player.Play();if(fading)incomingPlayer.Play();paused=false;StatusText.Text="PLAYING";}
+        else {player.Pause();if(fading)incomingPlayer.Pause();paused=true;StatusText.Text="PAUSED";}
+    }
     private void Stop_Click(object s,RoutedEventArgs e) => StopPlayback();
     private void StopPlayback() { incomingPlayer.Stop(); incomingPlayer.Close(); fading=false; player.Volume=playbackVolume; player.Stop(); stopped=true; paused=false; PlaybackProgress.Value=0; NowTime.Text="00:00"; StatusText.Text="STOPPED"; }
     private void Next_Click(object s,RoutedEventArgs e) => NextTrack();
@@ -176,12 +182,20 @@ public partial class MainWindow : Window
         if(next>=queue.Count||next==activeIndex)return;
         try {
             incomingPlayer.Stop();incomingPlayer.Open(new Uri(queue[next].Path));
-            incomingPlayer.Volume=0;incomingPlayer.Play();outgoingFadeEnd=EffectiveEndSeconds();fading=true;
+            incomingPlayer.Volume=0;incomingPlayer.Play();outgoingFadeEnd=EffectiveEndSeconds();
+            fadeStartPosition=player.Position.TotalSeconds;
+            outgoingFadeDuration=Math.Max(0.1,outgoingFadeEnd-fadeStartPosition);
+            fading=true;
             activeIndex=next;NowTitle.Text=queue[next].Display;NowSub.Text=queue[next].Path;
             QueueList.SelectedIndex=next;history.Insert(0,$"{DateTime.Now:HH:mm:ss}   {queue[next].Display}");
             if(history.Count>100)history.RemoveAt(history.Count-1);
             UpdateNext();SaveState();StatusText.Text="CROSSFADE";
         } catch(Exception ex){fading=false;StatusText.Text="CROSSFADE ERROR: "+ex.Message;}
+    }
+    private void ApplyFadeVolumes() {
+        double progress=Math.Clamp((player.Position.TotalSeconds-fadeStartPosition)/outgoingFadeDuration,0,1);
+        player.Volume=playbackVolume*Math.Cos(progress*Math.PI/2);
+        incomingPlayer.Volume=playbackVolume*Math.Sin(progress*Math.PI/2);
     }
     private void FinishCrossfade() {
         if(!fading)return;
@@ -236,6 +250,7 @@ public partial class MainWindow : Window
         var setOut=new MenuItem{Header="Mix Out → τρέχουσα θέση αναπαραγωγής"};
         setOut.Click+=(_,_)=>{
             if(activeIndex<0||activeIndex>=queue.Count||!player.NaturalDuration.HasTimeSpan)return;
+            if(fading){StatusText.Text="MIX OUT: WAIT UNTIL FADE ENDS";return;}
             manualMixOut[queue[activeIndex].Path]=Math.Clamp(player.Position.TotalSeconds,1,player.NaturalDuration.TimeSpan.TotalSeconds);
             SaveState();StatusText.Text="MIX OUT SAVED";UpdateFadeCountdown();
         };
@@ -249,7 +264,7 @@ public partial class MainWindow : Window
             item.Click+=(_,_)=>{
                 silenceThresholdDb=choice;
                 foreach(MenuItem other in settings.Items)other.IsChecked=ReferenceEquals(other,item);
-                audibleEnds.Clear();waveCache.Clear();waveBusy.Clear();
+                analysisGeneration++;audibleEnds.Clear();waveCache.Clear();
                 if(activeIndex>=0&&activeIndex<queue.Count)DrawWave(NowWaveform,queue[activeIndex].Path);
                 UpdateNext();SaveState();StatusText.Text=$"SILENCE THRESHOLD {choice:0} dB";
             };
@@ -301,7 +316,7 @@ public partial class MainWindow : Window
         if(IsLoaded)SaveState();
     }
     private void Volume_Changed(object s,RoutedPropertyChangedEventArgs<double> e) {
-        playbackVolume=e.NewValue/100.0; if(fading){double remaining=player.NaturalDuration.HasTimeSpan?(player.NaturalDuration.TimeSpan-player.Position).TotalSeconds:0;double t=Math.Clamp(1-remaining/Math.Max(0.1,crossfadeSeconds),0,1);player.Volume=playbackVolume*Math.Cos(t*Math.PI/2);incomingPlayer.Volume=playbackVolume*Math.Sin(t*Math.PI/2);}else{player.Volume=playbackVolume;incomingPlayer.Volume=playbackVolume;} foreach(var cp in cartPlayers)cp.Volume=playbackVolume;
+        playbackVolume=e.NewValue/100.0; if(fading)ApplyFadeVolumes();else{player.Volume=playbackVolume;incomingPlayer.Volume=playbackVolume;} foreach(var cp in cartPlayers)cp.Volume=playbackVolume;
         if(IsLoaded)SaveState();
     }
     private void PlaybackProgress_MouseDown(object s,MouseButtonEventArgs e) {
@@ -356,6 +371,8 @@ public partial class MainWindow : Window
     private async void DecodeWave(string path) {
         if(waveBusy.Contains(path)||waveCache.ContainsKey(path))return;
         waveBusy.Add(path);
+        int generation=analysisGeneration;
+        double detectionThreshold=silenceThresholdDb;
         try {
             var result=await Task.Run(()=>{
                 var values=new double[105];
@@ -365,7 +382,7 @@ public partial class MainWindow : Window
                 double lastLoudSecond=0;
                 double windowSum=0;long windowCount=0;long windowStart=0;
                 long windowSamples=Math.Max(1,audio.WaveFormat.SampleRate*audio.WaveFormat.Channels/10);
-                double threshold=Math.Pow(10,silenceThresholdDb/20.0);
+                double threshold=Math.Pow(10,detectionThreshold/20.0);
                 long total=(long)(audio.TotalTime.TotalSeconds*audio.WaveFormat.SampleRate*audio.WaveFormat.Channels);
                 var data=new float[4096];long pos=0;int n;
                 while((n=audio.Read(data,0,data.Length))>0){
@@ -385,6 +402,7 @@ public partial class MainWindow : Window
                 if(lastLoudSecond>0.5&&audibleEnd-lastLoudSecond>=0.7)audibleEnd=lastLoudSecond;
                 return (values,audibleEnd);
             });
+            if(generation!=analysisGeneration)return;
             audibleEnds[path]=result.audibleEnd;
             waveCache[path]=result.values;if(waveCache.Count>64){var oldest=waveCache.Keys.First();waveCache.Remove(oldest);audibleEnds.Remove(oldest);}
             DrawWave(NowWaveform,activeIndex>=0&&activeIndex<queue.Count?queue[activeIndex].Path:null);
