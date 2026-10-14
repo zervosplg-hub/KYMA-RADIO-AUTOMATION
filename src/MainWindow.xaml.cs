@@ -69,6 +69,7 @@ public partial class MainWindow : Window
     private bool repeatPlaylist = false;
     private readonly DispatcherTimer searchDebounce = new() { Interval = TimeSpan.FromMilliseconds(250) };
     private bool importing = false;
+    private bool refreshingLibrary = false;
     private readonly HashSet<string> libraryPaths = new(StringComparer.OrdinalIgnoreCase);
     private readonly Random random = new();
     private double playbackVolume = 0.85;
@@ -82,7 +83,7 @@ public partial class MainWindow : Window
         searchDebounce.Tick += (_,_) => { searchDebounce.Stop(); RefreshLibrary(); };
         saveDebounce.Tick += (_,_)=>{saveDebounce.Stop();if(fading){pendingStateSave=true;return;}FlushState();};
         ConfigureAudioMenus();
-        Title="KYMA RADIO AUTOMATION | SOHO Professional 2.5.1 BETA";
+        Title="KYMA RADIO AUTOMATION | SOHO Professional 2.6 BETA";
         Loaded += (_,_)=>UpdateVersionLabels(this);
         player.MediaEnded += Player_MediaEnded;
         incomingPlayer.MediaEnded += Player_MediaEnded;
@@ -113,15 +114,27 @@ public partial class MainWindow : Window
         for(int i=0;i<VisualTreeHelper.GetChildrenCount(root);i++){
             var child=VisualTreeHelper.GetChild(root,i);
             if(child is TextBlock label && label.Text.Contains("BROADCAST CONSOLE v2.2.1 BETA"))
-                label.Text=label.Text.Replace("v2.2.1 BETA","v2.5.1 BETA");
+                label.Text=label.Text.Replace("v2.2.1 BETA","v2.6 BETA");
             UpdateVersionLabels(child);
         }
     }
     private void RefreshLibrary() {
-        var term=SearchBox.Text.Trim();
-        var matches=string.IsNullOrWhiteSpace(term)?library.ToList():library.Where(t=>t.Display.Contains(term,StringComparison.CurrentCultureIgnoreCase)||t.Path.Contains(term,StringComparison.CurrentCultureIgnoreCase)).ToList();
-        filtered.Clear(); foreach(var t in matches)filtered.Add(t);
-        
+        if(refreshingLibrary)return;
+        refreshingLibrary=true;
+        try {
+            var term=SearchBox.Text.Trim();
+            var matches=string.IsNullOrWhiteSpace(term)?library.ToArray():library.Where(t=>t.Display.Contains(term,StringComparison.CurrentCultureIgnoreCase)||t.Path.Contains(term,StringComparison.CurrentCultureIgnoreCase)).ToArray();
+            var selectedPath=(LibraryList.SelectedItem as Track)?.Path;
+            var view=System.Windows.Data.CollectionViewSource.GetDefaultView(filtered);
+            using(view.DeferRefresh()){
+                filtered.Clear();
+                foreach(var track in matches)filtered.Add(track);
+            }
+            if(selectedPath!=null){
+                var selected=matches.FirstOrDefault(t=>string.Equals(t.Path,selectedPath,StringComparison.OrdinalIgnoreCase));
+                if(selected!=null)LibraryList.SelectedItem=selected;
+            }
+        } finally {refreshingLibrary=false;}
     }
     private void Import_Click(object s,RoutedEventArgs e) {
         var d=new OpenFileDialog { Filter="Audio files|*.mp3;*.wav;*.wma;*.aac;*.m4a;*.flac|All files|*.*", Multiselect=true };
@@ -150,8 +163,17 @@ public partial class MainWindow : Window
                 return paths;
             });
             int added=0;
-            foreach(var p in found)if(libraryPaths.Add(p)){library.Add(new Track{Path=p});added++;}
-            RefreshLibrary();UpdateNext();SaveState();StatusText.Text=$"FOLDER IMPORT: {added} νέα τραγούδια";
+            const int batchSize=250;
+            for(int start=0;start<found.Count;start+=batchSize){
+                int end=Math.Min(start+batchSize,found.Count);
+                for(int i=start;i<end;i++){
+                    var p=found[i];
+                    if(libraryPaths.Add(p)){library.Add(new Track{Path=p});added++;}
+                }
+                StatusText.Text=$"IMPORT: {end:N0}/{found.Count:N0} αρχεία · {added:N0} νέα";
+                await Dispatcher.InvokeAsync(()=>{},DispatcherPriority.Background);
+            }
+            RefreshLibrary();UpdateNext();SaveState();StatusText.Text=$"FOLDER IMPORT: {added:N0} νέα τραγούδια";
         } catch(Exception ex){StatusText.Text="IMPORT ERROR: "+ex.Message;}
         finally{importing=false;}
     }
