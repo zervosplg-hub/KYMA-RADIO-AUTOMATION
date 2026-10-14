@@ -83,7 +83,7 @@ public partial class MainWindow : Window
         searchDebounce.Tick += (_,_) => { searchDebounce.Stop(); RefreshLibrary(); };
         saveDebounce.Tick += (_,_)=>{saveDebounce.Stop();if(fading){pendingStateSave=true;return;}FlushState();};
         ConfigureAudioMenus();
-        Title="KYMA RADIO AUTOMATION | SOHO Professional 2.6 BETA";
+        Title="KYMA RADIO AUTOMATION | SOHO Professional 2.6.1 BETA";
         Loaded += (_,_)=>UpdateVersionLabels(this);
         player.MediaEnded += Player_MediaEnded;
         incomingPlayer.MediaEnded += Player_MediaEnded;
@@ -114,7 +114,7 @@ public partial class MainWindow : Window
         for(int i=0;i<VisualTreeHelper.GetChildrenCount(root);i++){
             var child=VisualTreeHelper.GetChild(root,i);
             if(child is TextBlock label && label.Text.Contains("BROADCAST CONSOLE v2.2.1 BETA"))
-                label.Text=label.Text.Replace("v2.2.1 BETA","v2.6 BETA");
+                label.Text=label.Text.Replace("v2.2.1 BETA","v2.6.1 BETA");
             UpdateVersionLabels(child);
         }
     }
@@ -125,11 +125,10 @@ public partial class MainWindow : Window
             var term=SearchBox.Text.Trim();
             var matches=string.IsNullOrWhiteSpace(term)?library.ToArray():library.Where(t=>t.Display.Contains(term,StringComparison.CurrentCultureIgnoreCase)||t.Path.Contains(term,StringComparison.CurrentCultureIgnoreCase)).ToArray();
             var selectedPath=(LibraryList.SelectedItem as Track)?.Path;
-            var view=System.Windows.Data.CollectionViewSource.GetDefaultView(filtered);
-            using(view.DeferRefresh()){
-                filtered.Clear();
-                foreach(var track in matches)filtered.Add(track);
-            }
+            // ObservableCollection mutations must occur outside CollectionView.DeferRefresh.
+            // DeferRefresh prohibits changes to the view's source collection in WPF.
+            filtered.Clear();
+            foreach(var track in matches)filtered.Add(track);
             if(selectedPath!=null){
                 var selected=matches.FirstOrDefault(t=>string.Equals(t.Path,selectedPath,StringComparison.OrdinalIgnoreCase));
                 if(selected!=null)LibraryList.SelectedItem=selected;
