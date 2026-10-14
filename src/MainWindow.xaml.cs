@@ -56,7 +56,7 @@ public partial class MainWindow : Window
             if(fading) {
                 double remaining=player.NaturalDuration.HasTimeSpan?(player.NaturalDuration.TimeSpan-player.Position).TotalSeconds:0;
                 double mix=Math.Clamp(remaining/Math.Max(0.1,crossfadeSeconds),0,1);
-                player.Volume=playbackVolume*mix;incomingPlayer.Volume=playbackVolume*(1-mix);
+                player.Volume=playbackVolume*Math.Cos((1-mix)*Math.PI/2);incomingPlayer.Volume=playbackVolume*Math.Sin((1-mix)*Math.PI/2);
                 if(remaining<=0.12)FinishCrossfade();
             } else if(auto&&!stopped&&!paused&&crossfadeSeconds>0&&player.NaturalDuration.HasTimeSpan) {
                 double remaining=(player.NaturalDuration.TimeSpan-player.Position).TotalSeconds;
@@ -260,7 +260,7 @@ public partial class MainWindow : Window
         if(IsLoaded)SaveState();
     }
     private void Volume_Changed(object s,RoutedPropertyChangedEventArgs<double> e) {
-        playbackVolume=e.NewValue/100.0; player.Volume=playbackVolume; if(!fading)incomingPlayer.Volume=playbackVolume; foreach(var cp in cartPlayers)cp.Volume=playbackVolume;
+        playbackVolume=e.NewValue/100.0; if(fading){double remaining=player.NaturalDuration.HasTimeSpan?(player.NaturalDuration.TimeSpan-player.Position).TotalSeconds:0;double t=Math.Clamp(1-remaining/Math.Max(0.1,crossfadeSeconds),0,1);player.Volume=playbackVolume*Math.Cos(t*Math.PI/2);incomingPlayer.Volume=playbackVolume*Math.Sin(t*Math.PI/2);}else{player.Volume=playbackVolume;incomingPlayer.Volume=playbackVolume;} foreach(var cp in cartPlayers)cp.Volume=playbackVolume;
         if(IsLoaded)SaveState();
     }
     private void PlaybackProgress_MouseDown(object s,MouseButtonEventArgs e) {
