@@ -50,7 +50,7 @@ public partial class MainWindow : Window
         player.MediaEnded += Player_MediaEnded;
         incomingPlayer.MediaEnded += Player_MediaEnded;
         player.MediaFailed += (_,e)=>Dispatcher.BeginInvoke(() => { StatusText.Text="PLAYBACK ERROR: " + e.ErrorException.Message; stopped=true; });
-        player.MediaOpened += (_,_)=> { if(player.NaturalDuration.HasTimeSpan) PlaybackProgress.Maximum=Math.Max(1,player.NaturalDuration.TimeSpan.TotalSeconds); };
+        player.MediaOpened += Player_MediaOpened; incomingPlayer.MediaOpened += Player_MediaOpened;
         timer.Tick += (_,_)=> {
             if(fading) {
                 double remaining=player.NaturalDuration.HasTimeSpan?(player.NaturalDuration.TimeSpan-player.Position).TotalSeconds:0;
@@ -129,10 +129,13 @@ public partial class MainWindow : Window
     private void LibraryList_DoubleClick(object s,MouseButtonEventArgs e) => AddToQueue_Click(s,new RoutedEventArgs());
     private void SearchBox_TextChanged(object s,TextChangedEventArgs e) { if(searchDebounce==null)return; searchDebounce.Stop(); searchDebounce.Start(); }
     private void Play_Click(object s,RoutedEventArgs e) { if(!stopped) { player.Play(); paused=false; StatusText.Text="PLAYING"; return; } if(queue.Count>0) { int i=activeIndex>=0?activeIndex:0; while(i<queue.Count && !File.Exists(queue[i].Path))i++; if(i<queue.Count)StartAt(i); else StatusText.Text="NO AVAILABLE AUDIO FILES"; } }
-    private void Pause_Click(object s,RoutedEventArgs e) { if(stopped)return; if(paused) { player.Play(); paused=false; StatusText.Text="PLAYING"; } else { player.Pause(); paused=true; StatusText.Text="PAUSED"; } }
+    private void Pause_Click(object s,RoutedEventArgs e) { if(stopped)return; if(fading)FinishCrossfade(); if(paused) { player.Play(); paused=false; StatusText.Text="PLAYING"; } else { player.Pause(); paused=true; StatusText.Text="PAUSED"; } }
     private void Stop_Click(object s,RoutedEventArgs e) => StopPlayback();
     private void StopPlayback() { incomingPlayer.Stop(); incomingPlayer.Close(); fading=false; player.Volume=playbackVolume; player.Stop(); stopped=true; paused=false; PlaybackProgress.Value=0; NowTime.Text="00:00"; StatusText.Text="STOPPED"; }
     private void Next_Click(object s,RoutedEventArgs e) => NextTrack();
+    private void Player_MediaOpened(object? sender,EventArgs e) {
+        Dispatcher.BeginInvoke(() => {if(ReferenceEquals(sender,player)&&player.NaturalDuration.HasTimeSpan)PlaybackProgress.Maximum=Math.Max(1,player.NaturalDuration.TimeSpan.TotalSeconds);});
+    }
     private void Player_MediaEnded(object? sender,EventArgs e) {
         Dispatcher.BeginInvoke(() => {
             if(!ReferenceEquals(sender,player)||fading)return;
@@ -158,7 +161,7 @@ public partial class MainWindow : Window
         if(!fading)return;
         var outgoing=player;player=incomingPlayer;incomingPlayer=outgoing;
         incomingPlayer.Stop();incomingPlayer.Close();incomingPlayer.Volume=playbackVolume;
-        player.Volume=playbackVolume;fading=false;PlaybackProgress.Value=0;
+        player.Volume=playbackVolume;fading=false;PlaybackProgress.Value=0;if(player.NaturalDuration.HasTimeSpan)PlaybackProgress.Maximum=Math.Max(1,player.NaturalDuration.TimeSpan.TotalSeconds);
         DrawWave(NowWaveform,activeIndex>=0&&activeIndex<queue.Count?queue[activeIndex].Path:null);
         StatusText.Text="PLAYING";
     }
