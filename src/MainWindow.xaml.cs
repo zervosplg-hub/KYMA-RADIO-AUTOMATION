@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Threading;
 using System.Text;
 using System.Collections.ObjectModel;
 using System.IO;
@@ -19,7 +20,8 @@ namespace KymaSoho;
 public sealed class Track {
     public string Path { get; set; } = "";
     public string Display => System.IO.Path.GetFileNameWithoutExtension(Path);
-    public string SearchText => (Display+" "+Path).ToUpperInvariant();
+    private string? searchCache;
+    public string SearchText => searchCache ??= (Display+" "+Path).ToUpperInvariant();
 }
 public sealed class FastTrackCollection : ObservableCollection<Track> {
     public void ReplaceAll(IEnumerable<Track> items) {
@@ -33,12 +35,34 @@ public sealed class FastTrackCollection : ObservableCollection<Track> {
 public partial class MainWindow : Window
 {
     private readonly Stopwatch sessionClock = Stopwatch.StartNew();
+    private readonly Process diagnosticsProcess=Process.GetCurrentProcess();
+    private TimeSpan lastCpuTime=TimeSpan.Zero;
+    private DateTime lastCpuSample=DateTime.UtcNow;
+    private DateTime lastPerformanceLog=DateTime.MinValue;
+    private CancellationTokenSource? cleanCancellation;
+    private CancellationTokenSource? importCancellation;
+    private readonly string errorLogPath=System.IO.Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "KYMA_SOHO","diagnostics-errors.log");
+    private void CancelBackgroundJobs(){
+        cleanCancellation?.Cancel();importCancellation?.Cancel();
+        LogDiagnostic("JOB","Cancellation requested for CLEAN / IMPORT");
+    }
+    private void PersistDiagnosticError(string message){
+        try {
+            Directory.CreateDirectory(System.IO.Path.GetDirectoryName(errorLogPath)!);
+            File.AppendAllText(errorLogPath,DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff")+" "+message+Environment.NewLine);
+        }catch { }
+    }
     private readonly Stopwatch startupClock = Stopwatch.StartNew();
     private readonly List<string> diagnosticLines = new();
     private readonly DispatcherTimer responsivenessTimer = new() { Interval=TimeSpan.FromSeconds(1) };
     private DateTime lastHeartbeat = DateTime.UtcNow;
     private Window? diagnosticsWindow;
     private TextBox? diagnosticsText;
+    private int consecutiveAudioFailures=0;
+    private string? lastStandbyFailedPath;
+    private int standbyRetryCount=0;
     private readonly Dictionary<MediaPlayer,(DateTime started,string path)> openRequests = new();
     private void TrackMediaOpen(MediaPlayer target,string path,string role) {
         openRequests[target]=(DateTime.UtcNow,path);
@@ -47,6 +71,7 @@ public partial class MainWindow : Window
     private void LogDiagnostic(string category,string message) {
         var line=$"{DateTime.Now:HH:mm:ss.fff} [{category}] {message}";
         diagnosticLines.Add(line);
+        if(category=="ERROR")PersistDiagnosticError(line);
         if(diagnosticLines.Count>1500)diagnosticLines.RemoveRange(0,diagnosticLines.Count-1500);
         if(diagnosticsText!=null) {
             diagnosticsText.AppendText(line+Environment.NewLine);
@@ -65,6 +90,11 @@ public partial class MainWindow : Window
                 Background=new SolidColorBrush(Color.FromRgb(40,69,94)),Foreground=Brushes.White };
             button.Click+=(_,_)=>action();bar.Children.Add(button);return button;
         }
+        Action("CANCEL CLEAN / IMPORT",CancelBackgroundJobs);
+        Action("OPEN ERROR LOG",()=>{
+            if(File.Exists(errorLogPath))Process.Start(new ProcessStartInfo(errorLogPath){UseShellExecute=true});
+            else LogDiagnostic("LOG","No persisted errors yet");
+        });
         Action("COPY LOG",()=>Clipboard.SetText(string.Join(Environment.NewLine,diagnosticLines)));
         Action("SAVE LOG",()=>{
             var dialog=new SaveFileDialog { Filter="Text log|*.log|Text file|*.txt",FileName="KYMA_Diagnostics_"+DateTime.Now.ToString("yyyyMMdd_HHmmss")+".log" };
@@ -153,7 +183,11 @@ public partial class MainWindow : Window
             Background=new SolidColorBrush(Color.FromRgb(45,83,107)),Foreground=Brushes.White,
             ToolTip="Diagnostics: χρόνοι, σφάλματα, καθυστερήσεις και καταγραφή συμβάντων" };
         debugButton.Click+=(_,_)=>OpenDiagnostics();
-        if(StatusText.Parent is Panel statusPanel)statusPanel.Children.Add(debugButton);
+        var cancelButton=new Button {Content="CANCEL JOB",Padding=new Thickness(10,5,10,5),
+            Background=new SolidColorBrush(Color.FromRgb(110,54,53)),Foreground=Brushes.White,
+            ToolTip="Ακύρωση CLEAN ή IMPORT χωρίς κλείσιμο του KYMA"};
+        cancelButton.Click+=(_,_)=>CancelBackgroundJobs();
+        if(StatusText.Parent is Panel statusPanel){statusPanel.Children.Add(debugButton);statusPanel.Children.Add(cancelButton);}
         else {
             var debugMenu=new MenuItem { Header="DEBUG / DIAGNOSTICS" };
             debugMenu.Click+=(_,_)=>OpenDiagnostics();
@@ -161,13 +195,22 @@ public partial class MainWindow : Window
             ContextMenu.Items.Add(debugMenu);
         }
         LogDiagnostic("STARTUP","UI initialized");
-        Title="KYMA RADIO AUTOMATION | SOHO Professional 2.9 BETA";
+        Title="KYMA RADIO AUTOMATION | SOHO Professional 3.0 BETA";
         EnableVirtualizedLists();
         Loaded += (_,_)=>{UpdateVersionLabels(this);LogDiagnostic("STARTUP",$"Window loaded in {startupClock.ElapsedMilliseconds} ms; library={library.Count:N0}; queue={queue.Count:N0}");};
         Dispatcher.UnhandledException+=(_,e)=>{LogDiagnostic("ERROR","Unhandled UI exception: "+e.Exception);};
+        AppDomain.CurrentDomain.UnhandledException+=(_,e)=>PersistDiagnosticError("FATAL: "+e.ExceptionObject);
+        TaskScheduler.UnobservedTaskException+=(_,e)=>PersistDiagnosticError("TASK: "+e.Exception);
         player.MediaEnded += Player_MediaEnded;
         incomingPlayer.MediaEnded += Player_MediaEnded;
-        player.MediaFailed += (_,e)=>Dispatcher.BeginInvoke(() => { StatusText.Text="PLAYBACK ERROR: " + e.ErrorException.Message; stopped=true; });
+        player.MediaFailed += (_,e)=>Dispatcher.BeginInvoke(() => {
+            StatusText.Text="PLAYBACK ERROR: "+e.ErrorException.Message;
+            if(auto && !stopped && consecutiveAudioFailures<3){
+                consecutiveAudioFailures++;
+                LogDiagnostic("RECOVERY",$"MAIN failed; skip to next (attempt {consecutiveAudioFailures}/3)");
+                NextTrack();
+            }else {stopped=true;LogDiagnostic("ERROR","MAIN stopped after playback failure");}
+        });
         player.MediaOpened += Player_MediaOpened; incomingPlayer.MediaOpened += Player_MediaOpened;
         player.MediaOpened+=MediaOpenedDiagnostic;
         incomingPlayer.MediaOpened+=MediaOpenedDiagnostic;
@@ -176,7 +219,21 @@ public partial class MainWindow : Window
         incomingPlayer.MediaFailed += (_,e)=>Dispatcher.BeginInvoke(()=>{
             preloadReady=false;preloadedPath=null;
             if(fading){FinishCrossfade();StatusText.Text="NEXT AUDIO ERROR";}
-            else StatusText.Text="PRELOAD ERROR: "+e.ErrorException.Message;
+            else {
+                StatusText.Text="PRELOAD ERROR: "+e.ErrorException.Message;
+                var failedPath=openRequests.TryGetValue(incomingPlayer,out var pending)?pending.path:lastStandbyFailedPath;
+                if(failedPath!=lastStandbyFailedPath){lastStandbyFailedPath=failedPath;standbyRetryCount=0;}
+                if(auto&&!stopped&&standbyRetryCount<1){
+                    standbyRetryCount++;
+                    LogDiagnostic("RECOVERY","Standby retry scheduled once");
+                    var retryTimer=new DispatcherTimer {Interval=TimeSpan.FromSeconds(2)};
+                    retryTimer.Tick+=(_,_)=>{
+                        retryTimer.Stop();
+                        if(!stopped&&!fading&&preloadedPath==null)PreloadUpcoming();
+                    };
+                    retryTimer.Start();
+                }
+            }
         });
         timer.Tick += (_,_)=> {
             if(fading) {
@@ -194,6 +251,14 @@ public partial class MainWindow : Window
         responsivenessTimer.Tick+=(_,_)=>{
             var now=DateTime.UtcNow;var gap=(now-lastHeartbeat).TotalMilliseconds;
             if(gap>2300)LogDiagnostic("UI",$"Dispatcher delayed {gap:F0} ms");
+            if((now-lastPerformanceLog).TotalSeconds>=10){
+                diagnosticsProcess.Refresh();
+                var cpu=diagnosticsProcess.TotalProcessorTime;
+                var elapsed=(now-lastCpuSample).TotalSeconds;
+                var cpuPct=elapsed>0?100*(cpu-lastCpuTime).TotalSeconds/(elapsed*Environment.ProcessorCount):0;
+                LogDiagnostic("PERF",$"CPU {cpuPct:F1}% · RAM {diagnosticsProcess.WorkingSet64/1048576:N0} MB · UI lag {Math.Max(0,gap-1000):F0} ms · audio={(stopped?"STOPPED":"ACTIVE")}");
+                lastCpuTime=cpu;lastCpuSample=now;lastPerformanceLog=now;
+            }
             lastHeartbeat=now;
         };
         responsivenessTimer.Start();
@@ -204,7 +269,7 @@ public partial class MainWindow : Window
         for(int i=0;i<VisualTreeHelper.GetChildrenCount(root);i++){
             var child=VisualTreeHelper.GetChild(root,i);
             if(child is TextBlock label && label.Text.Contains("BROADCAST CONSOLE v2.2.1 BETA"))
-                label.Text=label.Text.Replace("v2.2.1 BETA","v2.9 BETA");
+                label.Text=label.Text.Replace("v2.2.1 BETA","v3.0 BETA");
             UpdateVersionLabels(child);
         }
     }
@@ -220,8 +285,8 @@ public partial class MainWindow : Window
         if(refreshingLibrary)return;
         refreshingLibrary=true;
         try {
-            var term=SearchBox.Text.Trim();
-            var matches=string.IsNullOrWhiteSpace(term)?library.ToArray():library.Where(t=>t.SearchText.Contains(term.ToUpperInvariant(),StringComparison.Ordinal)).ToArray();
+            var term=SearchBox.Text.Trim().ToUpperInvariant();
+            var matches=term.Length==0?library.ToArray():library.Where(t=>t.SearchText.Contains(term,StringComparison.Ordinal)).ToArray();
             var selectedPath=(LibraryList.SelectedItem as Track)?.Path;
             // One CollectionChanged.Reset notification instead of thousands of add events.
             var refreshWatch=Stopwatch.StartNew();
@@ -244,16 +309,20 @@ public partial class MainWindow : Window
         if(importing)return;
         var dialog=new OpenFolderDialog { Title="Επιλογή φακέλου μουσικής", Multiselect=false };
         if(dialog.ShowDialog()!=true)return;
-        importing=true; var importWatch=Stopwatch.StartNew();LogDiagnostic("IMPORT","Folder scan started");StatusText.Text="SCANNING FOLDER...";
+        importing=true;importCancellation=new CancellationTokenSource();var token=importCancellation.Token; var importWatch=Stopwatch.StartNew();LogDiagnostic("IMPORT","Folder scan started");StatusText.Text="SCANNING FOLDER...";
         try {
             string root=dialog.FolderName;
             var found=await Task.Run(()=> {
+                Thread.CurrentThread.Priority=ThreadPriority.BelowNormal;
                 var paths=new List<string>(); var pending=new Stack<string>();pending.Push(root);
                 while(pending.Count>0){
+                    token.ThrowIfCancellationRequested();
                     var folder=pending.Pop();
                     try {
-                        foreach(var p in Directory.EnumerateFiles(folder))
+                        foreach(var p in Directory.EnumerateFiles(folder)){
+                            token.ThrowIfCancellationRequested();
                             if(audioExtensions.Contains(System.IO.Path.GetExtension(p),StringComparer.OrdinalIgnoreCase))paths.Add(p);
+                        }
                         foreach(var sub in Directory.EnumerateDirectories(folder))pending.Push(sub);
                     } catch(UnauthorizedAccessException){} catch(IOException){}
                 }
@@ -262,6 +331,7 @@ public partial class MainWindow : Window
             int added=0;
             const int batchSize=250;
             for(int start=0;start<found.Count;start+=batchSize){
+                token.ThrowIfCancellationRequested();
                 int end=Math.Min(start+batchSize,found.Count);
                 for(int i=start;i<end;i++){
                     var p=found[i];
@@ -271,8 +341,9 @@ public partial class MainWindow : Window
                 await Dispatcher.InvokeAsync(()=>{},DispatcherPriority.Background);
             }
             RefreshLibrary();UpdateNext();SaveState();StatusText.Text=$"FOLDER IMPORT: {added:N0} νέα τραγούδια";LogDiagnostic("IMPORT",$"{found.Count:N0} scanned, {added:N0} added in {importWatch.ElapsedMilliseconds} ms");
-        } catch(Exception ex){StatusText.Text="IMPORT ERROR: "+ex.Message;LogDiagnostic("ERROR","Import: "+ex);}
-        finally{importing=false;}
+        } catch(OperationCanceledException){StatusText.Text="IMPORT CANCELLED";LogDiagnostic("IMPORT","Cancelled by user; already imported tracks retained");RefreshLibrary();SaveState();}
+        catch(Exception ex){StatusText.Text="IMPORT ERROR: "+ex.Message;LogDiagnostic("ERROR","Import: "+ex);}
+        finally{importing=false;importCancellation?.Dispose();importCancellation=null;}
     }
     private void ExportPlaylist_Click(object s,RoutedEventArgs e) {
         var d=new SaveFileDialog { Filter="M3U playlist|*.m3u", FileName="KYMA_Playlist.m3u" };
@@ -322,6 +393,8 @@ public partial class MainWindow : Window
     private void MediaOpenedDiagnostic(object? sender,EventArgs e) {
         if(sender is not MediaPlayer source)return;
         var role=ReferenceEquals(source,player)?"MAIN":"STANDBY";
+        if(ReferenceEquals(source,player))consecutiveAudioFailures=0;
+        if(ReferenceEquals(source,incomingPlayer))standbyRetryCount=0;
         if(openRequests.Remove(source,out var request))
             LogDiagnostic("AUDIO",$"{role} opened {System.IO.Path.GetFileName(request.path)} in {(DateTime.UtcNow-request.started).TotalMilliseconds:F0} ms");
         else LogDiagnostic("AUDIO",$"{role} MediaOpened (no pending request)");
@@ -417,7 +490,7 @@ public partial class MainWindow : Window
     private bool cleaningLibrary = false;
     private async void RemoveMissing_Click(object s,RoutedEventArgs e) {
         if(cleaningLibrary)return;
-        cleaningLibrary=true;
+        cleaningLibrary=true;cleanCancellation=new CancellationTokenSource();var token=cleanCancellation.Token;
         var watch=Stopwatch.StartNew();
         LogDiagnostic("CLEAN","Fast folder-based scan started");
         StatusText.Text="CLEAN: γρήγορος έλεγχος φακέλων...";
@@ -433,10 +506,12 @@ public partial class MainWindow : Window
                         LogDiagnostic("CLEAN",$"Folders {p.count:N0}/{p.total:N0}, missing={p.missing:N0}, inaccessible={p.skipped:N0}, elapsed={watch.Elapsed:mm\\:ss}");
                 });
             var result=await Task.Run(()=>{
+                Thread.CurrentThread.Priority=ThreadPriority.BelowNormal;
                 var missing=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 int skipped=0;
                 int processed=0;
                 foreach(var group in folderGroups){
+                    token.ThrowIfCancellationRequested();
                     try {
                         // Enumerate only the immediate directory, not its entire subtree.
                         // If enumeration fails, preserve every library entry in that folder.
@@ -449,11 +524,13 @@ public partial class MainWindow : Window
                         skipped++;
                     }
                     processed++;
+                    if(!stopped && processed%8==0)Thread.Sleep(2);
                     if(processed%25==0||processed==folderGroups.Length)
                         progress.Report((processed,folderGroups.Length,missing.Count,skipped));
                 }
                 return (missing,skipped);
             });
+            token.ThrowIfCancellationRequested();
             LogDiagnostic("CLEAN",$"Folder scan finished in {watch.ElapsedMilliseconds} ms; {folderGroups.Length:N0} folders; {result.missing.Count:N0} missing; {result.skipped:N0} inaccessible");
             var kept=library.Where(t=>!result.missing.Contains(t.Path)).ToArray();
             int removed=library.Count-kept.Length;
@@ -474,8 +551,9 @@ public partial class MainWindow : Window
             if(result.missing.Count>0)SaveState();
             StatusText.Text=$"CLEAN OK: {removed:N0} αφαιρέθηκαν · {folderGroups.Length:N0} φάκελοι · {result.skipped:N0} μη προσβάσιμοι";
             LogDiagnostic("CLEAN",$"Completed in {watch.Elapsed:mm\\:ss}; {paths.Length:N0} entries; removed={removed:N0}; inaccessible folders={result.skipped:N0}");
-        } catch(Exception ex){StatusText.Text="CLEAN ERROR: "+ex.Message;LogDiagnostic("ERROR","Clean: "+ex);}
-        finally{cleaningLibrary=false;}
+        } catch(OperationCanceledException){StatusText.Text="CLEAN CANCELLED · no entries removed";LogDiagnostic("CLEAN","Cancelled; library unchanged");}
+        catch(Exception ex){StatusText.Text="CLEAN ERROR: "+ex.Message;LogDiagnostic("ERROR","Clean: "+ex);}
+        finally{cleaningLibrary=false;cleanCancellation?.Dispose();cleanCancellation=null;}
     }
     private void ClearHistory_Click(object s,RoutedEventArgs e) {
         if(history.Count==0)return;
