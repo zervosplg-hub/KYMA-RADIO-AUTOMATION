@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.Text;
 using System.Collections.ObjectModel;
 using System.IO;
 using System.Linq;
@@ -30,6 +32,52 @@ public sealed class FastTrackCollection : ObservableCollection<Track> {
 }
 public partial class MainWindow : Window
 {
+    private readonly Stopwatch sessionClock = Stopwatch.StartNew();
+    private readonly Stopwatch startupClock = Stopwatch.StartNew();
+    private readonly List<string> diagnosticLines = new();
+    private readonly DispatcherTimer responsivenessTimer = new() { Interval=TimeSpan.FromSeconds(1) };
+    private DateTime lastHeartbeat = DateTime.UtcNow;
+    private Window? diagnosticsWindow;
+    private TextBox? diagnosticsText;
+    private DateTime playbackRequestedAt;
+    private void LogDiagnostic(string category,string message) {
+        var line=$"{DateTime.Now:HH:mm:ss.fff} [{category}] {message}";
+        diagnosticLines.Add(line);
+        if(diagnosticLines.Count>1500)diagnosticLines.RemoveRange(0,diagnosticLines.Count-1500);
+        if(diagnosticsText!=null) {
+            diagnosticsText.AppendText(line+Environment.NewLine);
+            diagnosticsText.ScrollToEnd();
+        }
+    }
+    private void OpenDiagnostics() {
+        if(diagnosticsWindow!=null){diagnosticsWindow.Activate();return;}
+        var w=new Window { Title="KYMA | DEBUG / DIAGNOSTICS",Width=900,Height=580,MinWidth=580,MinHeight=350,
+            Background=new SolidColorBrush(Color.FromRgb(17,25,36)),Foreground=Brushes.White,Owner=this,
+            WindowStartupLocation=WindowStartupLocation.CenterOwner };
+        var root=new DockPanel { Margin=new Thickness(12) };
+        var bar=new StackPanel { Orientation=Orientation.Horizontal,Margin=new Thickness(0,0,0,8) };
+        Button Action(string title,Action action) {
+            var button=new Button { Content=title,Padding=new Thickness(14,7,14,7),Margin=new Thickness(0,0,8,0),
+                Background=new SolidColorBrush(Color.FromRgb(40,69,94)),Foreground=Brushes.White };
+            button.Click+=(_,_)=>action();bar.Children.Add(button);return button;
+        }
+        Action("COPY LOG",()=>Clipboard.SetText(string.Join(Environment.NewLine,diagnosticLines)));
+        Action("SAVE LOG",()=>{
+            var dialog=new SaveFileDialog { Filter="Text log|*.log|Text file|*.txt",FileName="KYMA_Diagnostics_"+DateTime.Now.ToString("yyyyMMdd_HHmmss")+".log" };
+            if(dialog.ShowDialog(w)==true)try{File.WriteAllLines(dialog.FileName,diagnosticLines);LogDiagnostic("LOG","Saved to "+dialog.FileName);}
+            catch(Exception ex){LogDiagnostic("ERROR","Log save failed: "+ex.Message);}
+        });
+        Action("CLEAR VIEW",()=>{diagnosticLines.Clear();diagnosticsText?.Clear();LogDiagnostic("LOG","View cleared");});
+        DockPanel.SetDock(bar,Dock.Top);root.Children.Add(bar);
+        diagnosticsText=new TextBox { IsReadOnly=true,AcceptsReturn=true,TextWrapping=TextWrapping.NoWrap,
+            VerticalScrollBarVisibility=ScrollBarVisibility.Auto,HorizontalScrollBarVisibility=ScrollBarVisibility.Auto,
+            FontFamily=new FontFamily("Consolas"),FontSize=12,Background=new SolidColorBrush(Color.FromRgb(9,17,27)),
+            Foreground=new SolidColorBrush(Color.FromRgb(177,228,211)),BorderThickness=new Thickness(1),
+            Text=string.Join(Environment.NewLine,diagnosticLines) };
+        root.Children.Add(diagnosticsText);w.Content=root;diagnosticsWindow=w;
+        w.Closed+=(_,_)=>{diagnosticsWindow=null;diagnosticsText=null;};
+        w.Show();diagnosticsText.ScrollToEnd();
+    }
     private readonly ObservableCollection<Track> library = new();
     private readonly ObservableCollection<Track> queue = new();
     private readonly FastTrackCollection filtered = new();
@@ -97,13 +145,29 @@ public partial class MainWindow : Window
         searchDebounce.Tick += (_,_) => { searchDebounce.Stop(); RefreshLibrary(); };
         saveDebounce.Tick += (_,_)=>{saveDebounce.Stop();if(fading){pendingStateSave=true;return;}FlushState();};
         ConfigureAudioMenus();
-        Title="KYMA RADIO AUTOMATION | SOHO Professional 2.7.2 BETA";
+        var debugButton=new Button { Content="DEBUG",Padding=new Thickness(12,5,12,5),
+            Background=new SolidColorBrush(Color.FromRgb(45,83,107)),Foreground=Brushes.White,
+            ToolTip="Diagnostics: χρόνοι, σφάλματα, καθυστερήσεις και καταγραφή συμβάντων" };
+        debugButton.Click+=(_,_)=>OpenDiagnostics();
+        if(StatusText.Parent is Panel statusPanel)statusPanel.Children.Add(debugButton);
+        else {
+            var debugMenu=new MenuItem { Header="DEBUG / DIAGNOSTICS" };
+            debugMenu.Click+=(_,_)=>OpenDiagnostics();
+            ContextMenu ??= new ContextMenu();
+            ContextMenu.Items.Add(debugMenu);
+        }
+        LogDiagnostic("STARTUP","UI initialized");
+        Title="KYMA RADIO AUTOMATION | SOHO Professional 2.8 BETA";
         EnableVirtualizedLists();
-        Loaded += (_,_)=>UpdateVersionLabels(this);
+        Loaded += (_,_)=>{UpdateVersionLabels(this);LogDiagnostic("STARTUP",$"Window loaded in {startupClock.ElapsedMilliseconds} ms; library={library.Count:N0}; queue={queue.Count:N0}");};
+        Dispatcher.UnhandledException+=(_,e)=>{LogDiagnostic("ERROR","Unhandled UI exception: "+e.Exception);};
         player.MediaEnded += Player_MediaEnded;
         incomingPlayer.MediaEnded += Player_MediaEnded;
         player.MediaFailed += (_,e)=>Dispatcher.BeginInvoke(() => { StatusText.Text="PLAYBACK ERROR: " + e.ErrorException.Message; stopped=true; });
         player.MediaOpened += Player_MediaOpened; incomingPlayer.MediaOpened += Player_MediaOpened;
+        player.MediaOpened+=(_,_)=>LogDiagnostic("AUDIO",$"Player opened in {(DateTime.UtcNow-playbackRequestedAt).TotalMilliseconds:F0} ms");
+        player.MediaFailed+=(_,e)=>LogDiagnostic("ERROR","Playback: "+e.ErrorException);
+        incomingPlayer.MediaFailed+=(_,e)=>LogDiagnostic("ERROR","Preload: "+e.ErrorException);
         incomingPlayer.MediaFailed += (_,e)=>Dispatcher.BeginInvoke(()=>{
             preloadReady=false;preloadedPath=null;
             if(fading){FinishCrossfade();StatusText.Text="NEXT AUDIO ERROR";}
@@ -122,14 +186,20 @@ public partial class MainWindow : Window
             }
             if(pendingStateSave&&!fading){pendingStateSave=false;SaveState();}
             UpdateFadeCountdown();UpdateWavePlayhead();Clock.Text=DateTime.Now.ToString("HH:mm:ss"); if(CurrentDurationSeconds()>0 && !stopped) NowTime.Text=$"{player.Position.ToString(@"mm\:ss")} / {TimeSpan.FromSeconds(CurrentDurationSeconds()).ToString(@"mm\:ss")}"; else NowTime.Text="00:00"; if(!stopped && player.NaturalDuration.HasTimeSpan) PlaybackProgress.Value=Math.Min(PlaybackProgress.Maximum,player.Position.TotalSeconds); };
-        player.Volume=playbackVolume; incomingPlayer.Volume=playbackVolume; foreach(var cp in cartPlayers)cp.Volume=playbackVolume; timer.Start(); LoadState(); UpdateNext(); DrawWave(NowWaveform, null); DrawWave(NextWaveform, null);
-        Closing += (_,_)=> { saveDebounce.Stop();FlushState(); player.Close(); incomingPlayer.Close(); foreach(var cp in cartPlayers)cp.Close(); };
+        responsivenessTimer.Tick+=(_,_)=>{
+            var now=DateTime.UtcNow;var gap=(now-lastHeartbeat).TotalMilliseconds;
+            if(gap>2300)LogDiagnostic("UI",$"Dispatcher delayed {gap:F0} ms");
+            lastHeartbeat=now;
+        };
+        responsivenessTimer.Start();
+        player.Volume=playbackVolume; incomingPlayer.Volume=playbackVolume; foreach(var cp in cartPlayers)cp.Volume=playbackVolume; timer.Start(); var loadWatch=Stopwatch.StartNew(); LoadState(); LogDiagnostic("LIBRARY",$"Restored {library.Count:N0} tracks in {loadWatch.ElapsedMilliseconds} ms"); UpdateNext(); DrawWave(NowWaveform, null); DrawWave(NextWaveform, null);
+        Closing += (_,_)=> {var closeWatch=Stopwatch.StartNew();responsivenessTimer.Stop();saveDebounce.Stop();FlushState();player.Close();incomingPlayer.Close();foreach(var cp in cartPlayers)cp.Close();LogDiagnostic("SHUTDOWN",$"Cleanup completed in {closeWatch.ElapsedMilliseconds} ms");};
     }
     private static void UpdateVersionLabels(DependencyObject root) {
         for(int i=0;i<VisualTreeHelper.GetChildrenCount(root);i++){
             var child=VisualTreeHelper.GetChild(root,i);
             if(child is TextBlock label && label.Text.Contains("BROADCAST CONSOLE v2.2.1 BETA"))
-                label.Text=label.Text.Replace("v2.2.1 BETA","v2.7.2 BETA");
+                label.Text=label.Text.Replace("v2.2.1 BETA","v2.8 BETA");
             UpdateVersionLabels(child);
         }
     }
@@ -149,7 +219,9 @@ public partial class MainWindow : Window
             var matches=string.IsNullOrWhiteSpace(term)?library.ToArray():library.Where(t=>t.SearchText.Contains(term.ToUpperInvariant(),StringComparison.Ordinal)).ToArray();
             var selectedPath=(LibraryList.SelectedItem as Track)?.Path;
             // One CollectionChanged.Reset notification instead of thousands of add events.
+            var refreshWatch=Stopwatch.StartNew();
             filtered.ReplaceAll(matches);
+            if(refreshWatch.ElapsedMilliseconds>150)LogDiagnostic("LIBRARY",$"Refresh {matches.Length:N0} tracks: {refreshWatch.ElapsedMilliseconds} ms");
             if(selectedPath!=null){
                 var selected=matches.FirstOrDefault(t=>string.Equals(t.Path,selectedPath,StringComparison.OrdinalIgnoreCase));
                 if(selected!=null)LibraryList.SelectedItem=selected;
@@ -167,7 +239,7 @@ public partial class MainWindow : Window
         if(importing)return;
         var dialog=new OpenFolderDialog { Title="Επιλογή φακέλου μουσικής", Multiselect=false };
         if(dialog.ShowDialog()!=true)return;
-        importing=true; StatusText.Text="SCANNING FOLDER...";
+        importing=true; var importWatch=Stopwatch.StartNew();LogDiagnostic("IMPORT","Folder scan started");StatusText.Text="SCANNING FOLDER...";
         try {
             string root=dialog.FolderName;
             var found=await Task.Run(()=> {
@@ -193,8 +265,8 @@ public partial class MainWindow : Window
                 StatusText.Text=$"IMPORT: {end:N0}/{found.Count:N0} αρχεία · {added:N0} νέα";
                 await Dispatcher.InvokeAsync(()=>{},DispatcherPriority.Background);
             }
-            RefreshLibrary();UpdateNext();SaveState();StatusText.Text=$"FOLDER IMPORT: {added:N0} νέα τραγούδια";
-        } catch(Exception ex){StatusText.Text="IMPORT ERROR: "+ex.Message;}
+            RefreshLibrary();UpdateNext();SaveState();StatusText.Text=$"FOLDER IMPORT: {added:N0} νέα τραγούδια";LogDiagnostic("IMPORT",$"{found.Count:N0} scanned, {added:N0} added in {importWatch.ElapsedMilliseconds} ms");
+        } catch(Exception ex){StatusText.Text="IMPORT ERROR: "+ex.Message;LogDiagnostic("ERROR","Import: "+ex);}
         finally{importing=false;}
     }
     private void ExportPlaylist_Click(object s,RoutedEventArgs e) {
@@ -332,7 +404,7 @@ public partial class MainWindow : Window
     private bool cleaningLibrary = false;
     private async void RemoveMissing_Click(object s,RoutedEventArgs e) {
         if(cleaningLibrary)return;
-        cleaningLibrary=true;
+        cleaningLibrary=true;var cleanWatch=Stopwatch.StartNew();LogDiagnostic("CLEAN","Missing file scan started");
         StatusText.Text="CLEAN: έλεγχος αρχείων στο παρασκήνιο...";
         try {
             // Check disk/network paths away from the WPF UI thread.
@@ -361,8 +433,8 @@ public partial class MainWindow : Window
                 }
             RefreshLibrary();UpdateNext();
             if(removed>0||missing.Count>0)SaveState();
-            StatusText.Text=$"CLEAN OK: {removed:N0} αρχεία αφαιρέθηκαν · {paths.Length:N0} ελέγχθηκαν";
-        } catch(Exception ex){StatusText.Text="CLEAN ERROR: "+ex.Message;}
+            StatusText.Text=$"CLEAN OK: {removed:N0} αρχεία αφαιρέθηκαν · {paths.Length:N0} ελέγχθηκαν";LogDiagnostic("CLEAN",$"{paths.Length:N0} checked, {removed:N0} removed in {cleanWatch.ElapsedMilliseconds} ms");
+        } catch(Exception ex){StatusText.Text="CLEAN ERROR: "+ex.Message;LogDiagnostic("ERROR","Clean: "+ex);}
         finally{cleaningLibrary=false;}
     }
     private void ClearHistory_Click(object s,RoutedEventArgs e) {
@@ -376,7 +448,7 @@ public partial class MainWindow : Window
         try{File.WriteAllLines(d.FileName,new[]{"Entry"}.Concat(history.Select(h=>"\""+h.Replace("\"","\"\"")+"\"")),System.Text.Encoding.UTF8);StatusText.Text="HISTORY EXPORTED";}
         catch(Exception ex){StatusText.Text="EXPORT ERROR: "+ex.Message;}
     }
-    private void StartAt(int index) { if(fading){incomingPlayer.Stop();incomingPlayer.Close();fading=false;fadeElapsedSeconds=0;player.Volume=playbackVolume;}preloadedPath=null;preloadReady=false; if(index<0||index>=queue.Count)return; var t=queue[index]; if(!File.Exists(t.Path)) { StatusText.Text="MISSING FILE: "+t.Path; return; } player.Stop(); player.Open(new Uri(t.Path)); player.Play(); activeIndex=index; stopped=false; paused=false; NowTitle.Text=t.Display; NowSub.Text=t.Path; QueueList.SelectedIndex=index; history.Insert(0,$"{DateTime.Now:HH:mm:ss}   {t.Display}"); if(history.Count>100)history.RemoveAt(history.Count-1); SaveState(); StatusText.Text="PLAYING"; PlaybackProgress.Value=0; UpdateNext(); DrawWave(NowWaveform,t.Path); }
+    private void StartAt(int index) { LogDiagnostic("AUDIO",$"StartAt index={index} queue={queue.Count}"); if(fading){incomingPlayer.Stop();incomingPlayer.Close();fading=false;fadeElapsedSeconds=0;player.Volume=playbackVolume;}preloadedPath=null;preloadReady=false; if(index<0||index>=queue.Count)return; var t=queue[index]; if(!File.Exists(t.Path)) { StatusText.Text="MISSING FILE: "+t.Path; return; } playbackRequestedAt=DateTime.UtcNow;player.Stop();player.Open(new Uri(t.Path));player.Play();activeIndex=index; stopped=false; paused=false; NowTitle.Text=t.Display; NowSub.Text=t.Path; QueueList.SelectedIndex=index; history.Insert(0,$"{DateTime.Now:HH:mm:ss}   {t.Display}"); if(history.Count>100)history.RemoveAt(history.Count-1); SaveState(); StatusText.Text="PLAYING"; PlaybackProgress.Value=0; UpdateNext(); DrawWave(NowWaveform,t.Path); }
     private void ConfigureAudioMenus() {
         var queueMenu=new ContextMenu();
         var setOut=new MenuItem{Header="Mix Out → τρέχουσα θέση αναπαραγωγής"};
@@ -493,7 +565,7 @@ public partial class MainWindow : Window
     private void Save_Click(object s,RoutedEventArgs e) { SaveState(); StatusText.Text="LIBRARY SAVED"; }
     private sealed class SavedState { public List<string> Library {get;set;}=new(); public List<string> Queue {get;set;}=new(); public string?[] Carts {get;set;}=new string?[9]; public bool Auto {get;set;}=false; public bool Repeat {get;set;}=false; public double Crossfade {get;set;}=5; public bool PreventDuplicates {get;set;}=true; public double SilenceThresholdDb {get;set;}=-42; public Dictionary<string,double> MixOut {get;set;}=new(); public double Volume {get;set;}=85; public List<string> History {get;set;}=new(); }
     private void SaveState() { if(loadingState)return;stateDirty=true;saveDebounce.Stop();saveDebounce.Start(); }
-    private void FlushState() { if(!stateDirty)return; try { Directory.CreateDirectory(System.IO.Path.GetDirectoryName(stateFile)!); File.WriteAllText(stateFile,JsonSerializer.Serialize(new SavedState { Library=library.Select(t=>t.Path).ToList(),Queue=queue.Select(t=>t.Path).ToList(),Carts=carts,Auto=auto,Repeat=repeatPlaylist,Crossfade=crossfadeSeconds,PreventDuplicates=preventQueueDuplicates,SilenceThresholdDb=silenceThresholdDb,MixOut=new Dictionary<string,double>(manualMixOut),Volume=playbackVolume*100,History=history.ToList() })); stateDirty=false; } catch(Exception ex) { StatusText.Text="SAVE ERROR: "+ex.Message; } }
+    private void FlushState() { if(!stateDirty)return; var saveWatch=Stopwatch.StartNew();try { Directory.CreateDirectory(System.IO.Path.GetDirectoryName(stateFile)!); File.WriteAllText(stateFile,JsonSerializer.Serialize(new SavedState { Library=library.Select(t=>t.Path).ToList(),Queue=queue.Select(t=>t.Path).ToList(),Carts=carts,Auto=auto,Repeat=repeatPlaylist,Crossfade=crossfadeSeconds,PreventDuplicates=preventQueueDuplicates,SilenceThresholdDb=silenceThresholdDb,MixOut=new Dictionary<string,double>(manualMixOut),Volume=playbackVolume*100,History=history.ToList() })); stateDirty=false;LogDiagnostic("SAVE",$"State saved in {saveWatch.ElapsedMilliseconds} ms"); } catch(Exception ex) { StatusText.Text="SAVE ERROR: "+ex.Message;LogDiagnostic("ERROR","Save: "+ex); } }
     private void LoadState() { loadingState=true;try { if(!File.Exists(stateFile))return; var state=JsonSerializer.Deserialize<SavedState>(File.ReadAllText(stateFile)); if(state==null)return; silenceThresholdDb=Math.Clamp(state.SilenceThresholdDb,-54,-30); manualMixOut.Clear();foreach(var entry in state.MixOut??new Dictionary<string,double>())if(entry.Value>0)manualMixOut[entry.Key]=entry.Value; auto=state.Auto; RefreshAutoButton(); repeatPlaylist=state.Repeat; RefreshRepeatButton(); crossfadeSeconds=Math.Clamp(state.Crossfade,0,15);CrossfadeSlider.Value=crossfadeSeconds;preventQueueDuplicates=state.PreventDuplicates;PreventDuplicatesCheck.IsChecked=preventQueueDuplicates; playbackVolume=Math.Clamp(state.Volume/100.0,0,1); player.Volume=playbackVolume; foreach(var cp in cartPlayers)cp.Volume=playbackVolume; VolumeSlider.Value=playbackVolume*100; foreach(var entry in state.History??new List<string>()) { if(history.Count>=100)break; history.Add(entry); } foreach(var p in state.Library)if(!string.IsNullOrWhiteSpace(p)&&libraryPaths.Add(p))library.Add(new Track{Path=p}); foreach(var p in state.Queue)if(!string.IsNullOrWhiteSpace(p))queue.Add(new Track{Path=p}); for(int i=0;i<Math.Min(9,(state.Carts?.Length ?? 0));i++) { if(state.Carts![i] is string p && File.Exists(p)) { carts[i]=p; UpdateCartPad(i,false); } } RefreshLibrary(); UpdateNext(); } catch(Exception ex) { StatusText.Text="LOAD ERROR: "+ex.Message; } finally {loadingState=false;} }
     private void Window_KeyDown(object sender,KeyEventArgs e) { if(Keyboard.FocusedElement is TextBox)return; if(e.Key==Key.F5) { Play_Click(sender,new RoutedEventArgs()); e.Handled=true; } else if(e.Key==Key.F6) { Pause_Click(sender,new RoutedEventArgs()); e.Handled=true; } else if(e.Key==Key.F7) { Stop_Click(sender,new RoutedEventArgs()); e.Handled=true; } else if(e.Key==Key.F8) { Next_Click(sender,new RoutedEventArgs()); e.Handled=true; } else if(e.Key==Key.F9) { Auto_Click(sender,new RoutedEventArgs()); e.Handled=true; } else if(e.Key==Key.F10) { Repeat_Click(sender,new RoutedEventArgs()); e.Handled=true; } else if(e.Key>=Key.D1 && e.Key<=Key.D9) { PlayCart((int)e.Key-(int)Key.D1); e.Handled=true; } else if(e.Key>=Key.NumPad1 && e.Key<=Key.NumPad9) { PlayCart((int)e.Key-(int)Key.NumPad1); e.Handled=true; } }
     private void Waveform_SizeChanged(object sender,SizeChangedEventArgs e) {
@@ -543,6 +615,7 @@ public partial class MainWindow : Window
             if(generation!=analysisGeneration)return;
             audibleEnds[path]=result.audibleEnd;
             decodedDurations[path]=result.duration;
+            LogDiagnostic("WAVE",$"Decoded {System.IO.Path.GetFileName(path)} duration={result.duration:F1}s");
             waveCache[path]=result.values;if(waveCache.Count>64){var oldest=waveCache.Keys.First();waveCache.Remove(oldest);audibleEnds.Remove(oldest);decodedDurations.Remove(oldest);}
             DrawWave(NowWaveform,activeIndex>=0&&activeIndex<queue.Count?queue[activeIndex].Path:null);
             int next=activeIndex<0?0:activeIndex+1;if(next>=queue.Count&&repeatPlaylist)next=0;
