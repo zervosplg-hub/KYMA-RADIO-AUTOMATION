@@ -19,11 +19,20 @@ public sealed class Track {
     public string Display => System.IO.Path.GetFileNameWithoutExtension(Path);
     public string SearchText => (Display+" "+Path).ToUpperInvariant();
 }
+public sealed class FastTrackCollection : ObservableCollection<Track> {
+    public void ReplaceAll(IEnumerable<Track> items) {
+        Items.Clear();
+        foreach(var item in items)Items.Add(item);
+        OnPropertyChanged(new System.ComponentModel.PropertyChangedEventArgs(nameof(Count)));
+        OnPropertyChanged(new System.ComponentModel.PropertyChangedEventArgs("Item[]"));
+        OnCollectionChanged(new System.Collections.Specialized.NotifyCollectionChangedEventArgs(System.Collections.Specialized.NotifyCollectionChangedAction.Reset));
+    }
+}
 public partial class MainWindow : Window
 {
     private readonly ObservableCollection<Track> library = new();
     private readonly ObservableCollection<Track> queue = new();
-    private readonly ObservableCollection<Track> filtered = new();
+    private readonly FastTrackCollection filtered = new();
     private readonly ObservableCollection<string> history = new();
     private MediaPlayer player = new();
     private MediaPlayer incomingPlayer = new();
@@ -37,6 +46,7 @@ public partial class MainWindow : Window
     private bool pendingStateSave = false;
     private readonly DispatcherTimer saveDebounce = new() { Interval=TimeSpan.FromSeconds(2) };
     private bool loadingState = false;
+    private bool stateDirty = false;
     private string? preloadedPath;
     private bool preloadReady;
     private DateTime preloadStartedAt = DateTime.MinValue;
@@ -87,7 +97,7 @@ public partial class MainWindow : Window
         searchDebounce.Tick += (_,_) => { searchDebounce.Stop(); RefreshLibrary(); };
         saveDebounce.Tick += (_,_)=>{saveDebounce.Stop();if(fading){pendingStateSave=true;return;}FlushState();};
         ConfigureAudioMenus();
-        Title="KYMA RADIO AUTOMATION | SOHO Professional 2.7 BETA";
+        Title="KYMA RADIO AUTOMATION | SOHO Professional 2.7.1 BETA";
         EnableVirtualizedLists();
         Loaded += (_,_)=>UpdateVersionLabels(this);
         player.MediaEnded += Player_MediaEnded;
@@ -119,7 +129,7 @@ public partial class MainWindow : Window
         for(int i=0;i<VisualTreeHelper.GetChildrenCount(root);i++){
             var child=VisualTreeHelper.GetChild(root,i);
             if(child is TextBlock label && label.Text.Contains("BROADCAST CONSOLE v2.2.1 BETA"))
-                label.Text=label.Text.Replace("v2.2.1 BETA","v2.7 BETA");
+                label.Text=label.Text.Replace("v2.2.1 BETA","v2.7.1 BETA");
             UpdateVersionLabels(child);
         }
     }
@@ -138,12 +148,8 @@ public partial class MainWindow : Window
             var term=SearchBox.Text.Trim();
             var matches=string.IsNullOrWhiteSpace(term)?library.ToArray():library.Where(t=>t.SearchText.Contains(term.ToUpperInvariant(),StringComparison.Ordinal)).ToArray();
             var selectedPath=(LibraryList.SelectedItem as Track)?.Path;
-            // ObservableCollection mutations must occur outside CollectionView.DeferRefresh.
-            // DeferRefresh prohibits changes to the view's source collection in WPF.
-            // Reset the view once, rather than notifying WPF for every item.
-            // This keeps the virtualized list responsive with large music libraries.
-            filtered.Clear();
-            foreach(var track in matches)filtered.Add(track);
+            // One CollectionChanged.Reset notification instead of thousands of add events.
+            filtered.ReplaceAll(matches);
             if(selectedPath!=null){
                 var selected=matches.FirstOrDefault(t=>string.Equals(t.Path,selectedPath,StringComparison.OrdinalIgnoreCase));
                 if(selected!=null)LibraryList.SelectedItem=selected;
@@ -460,9 +466,9 @@ public partial class MainWindow : Window
     private void StopCart_Click(object s,RoutedEventArgs e) { for(int i=0;i<cartPlayers.Length;i++){cartPlayers[i].Stop();UpdateCartPad(i,false);} StatusText.Text="ALL CARTS STOPPED"; }
     private void Save_Click(object s,RoutedEventArgs e) { SaveState(); StatusText.Text="LIBRARY SAVED"; }
     private sealed class SavedState { public List<string> Library {get;set;}=new(); public List<string> Queue {get;set;}=new(); public string?[] Carts {get;set;}=new string?[9]; public bool Auto {get;set;}=false; public bool Repeat {get;set;}=false; public double Crossfade {get;set;}=5; public bool PreventDuplicates {get;set;}=true; public double SilenceThresholdDb {get;set;}=-42; public Dictionary<string,double> MixOut {get;set;}=new(); public double Volume {get;set;}=85; public List<string> History {get;set;}=new(); }
-    private void SaveState() { if(loadingState)return;saveDebounce.Stop();saveDebounce.Start(); }
-    private void FlushState() { try { Directory.CreateDirectory(System.IO.Path.GetDirectoryName(stateFile)!); File.WriteAllText(stateFile,JsonSerializer.Serialize(new SavedState { Library=library.Select(t=>t.Path).ToList(),Queue=queue.Select(t=>t.Path).ToList(),Carts=carts,Auto=auto,Repeat=repeatPlaylist,Crossfade=crossfadeSeconds,PreventDuplicates=preventQueueDuplicates,SilenceThresholdDb=silenceThresholdDb,MixOut=new Dictionary<string,double>(manualMixOut),Volume=playbackVolume*100,History=history.ToList() })); } catch(Exception ex) { StatusText.Text="SAVE ERROR: "+ex.Message; } }
-    private void LoadState() { loadingState=true;try { if(!File.Exists(stateFile))return; var state=JsonSerializer.Deserialize<SavedState>(File.ReadAllText(stateFile)); if(state==null)return; silenceThresholdDb=Math.Clamp(state.SilenceThresholdDb,-54,-30); manualMixOut.Clear();foreach(var entry in state.MixOut??new Dictionary<string,double>())if(entry.Value>0)manualMixOut[entry.Key]=entry.Value; auto=state.Auto; RefreshAutoButton(); repeatPlaylist=state.Repeat; RefreshRepeatButton(); crossfadeSeconds=Math.Clamp(state.Crossfade,0,15);CrossfadeSlider.Value=crossfadeSeconds;preventQueueDuplicates=state.PreventDuplicates;PreventDuplicatesCheck.IsChecked=preventQueueDuplicates; playbackVolume=Math.Clamp(state.Volume/100.0,0,1); player.Volume=playbackVolume; foreach(var cp in cartPlayers)cp.Volume=playbackVolume; VolumeSlider.Value=playbackVolume*100; foreach(var entry in state.History??new List<string>()) { if(history.Count>=100)break; history.Add(entry); } foreach(var p in state.Library.Where(File.Exists))if(libraryPaths.Add(p))library.Add(new Track{Path=p}); foreach(var p in state.Queue.Where(File.Exists))queue.Add(new Track{Path=p}); for(int i=0;i<Math.Min(9,(state.Carts?.Length ?? 0));i++) { if(state.Carts![i] is string p && File.Exists(p)) { carts[i]=p; UpdateCartPad(i,false); } } RefreshLibrary(); UpdateNext(); } catch(Exception ex) { StatusText.Text="LOAD ERROR: "+ex.Message; } finally {loadingState=false;} }
+    private void SaveState() { if(loadingState)return;stateDirty=true;saveDebounce.Stop();saveDebounce.Start(); }
+    private void FlushState() { if(!stateDirty)return; try { Directory.CreateDirectory(System.IO.Path.GetDirectoryName(stateFile)!); File.WriteAllText(stateFile,JsonSerializer.Serialize(new SavedState { Library=library.Select(t=>t.Path).ToList(),Queue=queue.Select(t=>t.Path).ToList(),Carts=carts,Auto=auto,Repeat=repeatPlaylist,Crossfade=crossfadeSeconds,PreventDuplicates=preventQueueDuplicates,SilenceThresholdDb=silenceThresholdDb,MixOut=new Dictionary<string,double>(manualMixOut),Volume=playbackVolume*100,History=history.ToList() })); stateDirty=false; } catch(Exception ex) { StatusText.Text="SAVE ERROR: "+ex.Message; } }
+    private void LoadState() { loadingState=true;try { if(!File.Exists(stateFile))return; var state=JsonSerializer.Deserialize<SavedState>(File.ReadAllText(stateFile)); if(state==null)return; silenceThresholdDb=Math.Clamp(state.SilenceThresholdDb,-54,-30); manualMixOut.Clear();foreach(var entry in state.MixOut??new Dictionary<string,double>())if(entry.Value>0)manualMixOut[entry.Key]=entry.Value; auto=state.Auto; RefreshAutoButton(); repeatPlaylist=state.Repeat; RefreshRepeatButton(); crossfadeSeconds=Math.Clamp(state.Crossfade,0,15);CrossfadeSlider.Value=crossfadeSeconds;preventQueueDuplicates=state.PreventDuplicates;PreventDuplicatesCheck.IsChecked=preventQueueDuplicates; playbackVolume=Math.Clamp(state.Volume/100.0,0,1); player.Volume=playbackVolume; foreach(var cp in cartPlayers)cp.Volume=playbackVolume; VolumeSlider.Value=playbackVolume*100; foreach(var entry in state.History??new List<string>()) { if(history.Count>=100)break; history.Add(entry); } foreach(var p in state.Library)if(!string.IsNullOrWhiteSpace(p)&&libraryPaths.Add(p))library.Add(new Track{Path=p}); foreach(var p in state.Queue)if(!string.IsNullOrWhiteSpace(p))queue.Add(new Track{Path=p}); for(int i=0;i<Math.Min(9,(state.Carts?.Length ?? 0));i++) { if(state.Carts![i] is string p && File.Exists(p)) { carts[i]=p; UpdateCartPad(i,false); } } RefreshLibrary(); UpdateNext(); } catch(Exception ex) { StatusText.Text="LOAD ERROR: "+ex.Message; } finally {loadingState=false;} }
     private void Window_KeyDown(object sender,KeyEventArgs e) { if(Keyboard.FocusedElement is TextBox)return; if(e.Key==Key.F5) { Play_Click(sender,new RoutedEventArgs()); e.Handled=true; } else if(e.Key==Key.F6) { Pause_Click(sender,new RoutedEventArgs()); e.Handled=true; } else if(e.Key==Key.F7) { Stop_Click(sender,new RoutedEventArgs()); e.Handled=true; } else if(e.Key==Key.F8) { Next_Click(sender,new RoutedEventArgs()); e.Handled=true; } else if(e.Key==Key.F9) { Auto_Click(sender,new RoutedEventArgs()); e.Handled=true; } else if(e.Key==Key.F10) { Repeat_Click(sender,new RoutedEventArgs()); e.Handled=true; } else if(e.Key>=Key.D1 && e.Key<=Key.D9) { PlayCart((int)e.Key-(int)Key.D1); e.Handled=true; } else if(e.Key>=Key.NumPad1 && e.Key<=Key.NumPad9) { PlayCart((int)e.Key-(int)Key.NumPad1); e.Handled=true; } }
     private void Waveform_SizeChanged(object sender,SizeChangedEventArgs e) {
         if(sender==NowWaveform)DrawWave(NowWaveform,activeIndex>=0&&activeIndex<queue.Count?queue[activeIndex].Path:null);
