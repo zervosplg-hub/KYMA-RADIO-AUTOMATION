@@ -5,6 +5,7 @@ using System.Threading;
 using System.Text;
 using System.Collections.ObjectModel;
 using System.IO;
+using System.IO.Compression;
 using System.Linq;
 using System.Text.Json;
 using System.Threading.Tasks;
@@ -597,7 +598,6 @@ public partial class MainWindow : Window
     private int mainRecoveryAttempts=0;
     private int standbyRecoveryAttempts=0;
     private DateTime lastMissingLogUtc=DateTime.MinValue;
-    private bool shortTrackWarningIssued=false;
     private void CheckPreloadHealth(){
         if(stopped||paused||!auto||fading)return;
         int upcoming=FindUpcomingIndex();
