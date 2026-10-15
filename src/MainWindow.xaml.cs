@@ -174,6 +174,135 @@ public partial class MainWindow : Window
         copy.Click+=(_,_)=>{if(!string.IsNullOrEmpty(output.Text))Clipboard.SetText(output.Text);};
         w.Show();
     }
+
+    // PRO Operations: independent management tools, isolated from the on-air engine.
+    private readonly string proDataDirectory=System.IO.Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"KYMA_SOHO","PRO");
+    private void OpenProOperations(){
+        Directory.CreateDirectory(proDataDirectory);
+        var w=new Window { Title="KYMA RADIO AUTOMATION PRO | OPERATIONS",
+            Width=1060,Height=720,MinWidth=740,MinHeight=490,
+            Background=new SolidColorBrush(Color.FromRgb(17,25,36)),
+            Foreground=Brushes.White,Owner=this,WindowStartupLocation=WindowStartupLocation.CenterOwner };
+        var root=new DockPanel { Margin=new Thickness(14) };
+        var title=new TextBlock { Text="KYMA PRO  ·  OPERATIONS CENTER",FontSize=21,
+            FontWeight=FontWeights.Bold,Foreground=Brushes.White,Margin=new Thickness(0,0,0,10) };
+        DockPanel.SetDock(title,Dock.Top);root.Children.Add(title);
+        var note=new TextBlock { Text="Εργαλεία διαχείρισης · Δεν επηρεάζουν την ενεργή αναπαραγωγή. Τα clocks και οι καμπάνιες δεν εκτελούνται αυτόματα ακόμη.",
+            TextWrapping=TextWrapping.Wrap,Foreground=new SolidColorBrush(Color.FromRgb(170,197,218)),Margin=new Thickness(0,0,0,12) };
+        DockPanel.SetDock(note,Dock.Top);root.Children.Add(note);
+        var panel=new Grid();
+        panel.RowDefinitions.Add(new RowDefinition { Height=GridLength.Auto });
+        panel.RowDefinitions.Add(new RowDefinition { Height=new GridLength(1,GridUnitType.Star) });
+        var buttons=new WrapPanel { Margin=new Thickness(0,0,0,12) };
+        Grid.SetRow(buttons,0);panel.Children.Add(buttons);
+        var editor=new TextBox { AcceptsReturn=true,AcceptsTab=true,TextWrapping=TextWrapping.NoWrap,
+            VerticalScrollBarVisibility=ScrollBarVisibility.Auto,
+            HorizontalScrollBarVisibility=ScrollBarVisibility.Auto,
+            FontFamily=new FontFamily("Consolas"),FontSize=13 };
+        Grid.SetRow(editor,1);panel.Children.Add(editor);
+        root.Children.Add(panel);w.Content=root;
+        string currentDocument="";
+        string SafeName(string name)=>System.IO.Path.Combine(proDataDirectory,name+".txt");
+        void OpenDocument(string name,string template){
+            currentDocument=name;
+            string path=SafeName(name);
+            editor.Text=File.Exists(path)?File.ReadAllText(path):template;
+            w.Title="KYMA PRO | "+name;
+        }
+        void Add(string label,Action action){
+            var button=new Button { Content=label,Padding=new Thickness(12,8,12,8),
+                Margin=new Thickness(0,0,7,7),Background=new SolidColorBrush(Color.FromRgb(39,75,106)),
+                Foreground=Brushes.White };
+            button.Click+=(_,_)=>{try{action();}catch(Exception ex){
+                MessageBox.Show(ex.Message,"KYMA PRO",MessageBoxButton.OK,MessageBoxImage.Warning);
+                LogDiagnostic("ERROR","PRO operations: "+ex);
+            }};
+            buttons.Children.Add(button);
+        }
+        // 1: persisted hourly clock template editor
+        Add("1 · CLOCKS",()=>OpenDocument("CLOCKS",
+            "# Ωριαίο Clock (πρότυπο, όχι ενεργό scheduler)\\n00:00 MUSIC\\n00:15 JINGLE\\n00:30 MUSIC\\n00:45 STATION ID\\n"));
+        // 2: persisted rotation and separation rules
+        Add("2 · ROTATION",()=>OpenDocument("ROTATION",
+            "# Μουσικοί κανόνες (πρότυπο)\\nARTIST_SEPARATION_MIN=90\\nTITLE_SEPARATION_MIN=240\\n"));
+        // 3: category definitions
+        Add("3 · CATEGORIES",()=>OpenDocument("CATEGORIES",
+            "# Κατηγορίες\\nGOLD\\nCURRENT\\nGREEK\\nINTERNATIONAL\\nJINGLES\\n"));
+        // 4: commercial clients
+        Add("4 · CLIENTS",()=>OpenDocument("CLIENTS",
+            "# Πελάτες · ένα όνομα ανά γραμμή\\n"));
+        // 5: spot campaign manifest
+        Add("5 · CAMPAIGNS",()=>OpenDocument("CAMPAIGNS",
+            "# Καμπάνιες · CSV: client,spot,start_date,end_date,plays_per_day\\n"));
+        // 6: break templates
+        Add("6 · AD BREAKS",()=>OpenDocument("AD_BREAKS",
+            "# Πρότυπα διαφημιστικών διαλειμμάτων (όχι ενεργά)\\n08:00\\n12:00\\n18:00\\n"));
+        // 7: jingle and voice tracking rundown notes
+        Add("7 · VOICE / JINGLES",()=>OpenDocument("VOICE_TRACKING",
+            "# Σημειώσεις voice tracking / jingle placements\\n"));
+        // 8: planned hourly clock preview
+        Add("8 · CLOCK PREVIEW",OpenClockPreview);
+        // 9: read-only real playback history
+        Add("9 · AS-RUN",()=>{
+            currentDocument="";
+            editor.Text="KYMA PRO · PLAYBACK HISTORY (session/state)"+Environment.NewLine+
+                string.Join(Environment.NewLine,history);
+        });
+        // 10: generate exportable diagnostics
+        Add("10 · HEALTH",()=>{
+            currentDocument="";
+            RecordMemorySample();
+            editor.Text=$"KYMA PRO · BROADCAST HEALTH · {DateTime.Now:yyyy-MM-dd HH:mm:ss}"+
+                Environment.NewLine+$"Crossfades: {completedCrossfades}"+
+                Environment.NewLine+$"Preload ready: {preloadReadyCount}"+
+                Environment.NewLine+$"Preload average ms: {(preloadReadyCount>0?preloadTotalMs/preloadReadyCount:0):F0}"+
+                Environment.NewLine+$"Slow opens: {slowOpenTotal}"+
+                Environment.NewLine+$"UI lag events: {uiLagEvents}"+
+                Environment.NewLine+$"Peak RAM MB: {peakMemoryMb}"+
+                Environment.NewLine+$"Main recoveries: {mainRecoveryAttempts}"+
+                Environment.NewLine+$"Standby retries: {standbyRecoveryAttempts}";
+        });
+        Add("SAVE",()=>{
+            if(string.IsNullOrEmpty(currentDocument)){
+                MessageBox.Show("Επέλεξε πρώτα ένα επεξεργάσιμο αρχείο.","KYMA PRO");return;
+            }
+            string path=SafeName(currentDocument);
+            string temporary=path+".tmp";
+            File.WriteAllText(temporary,editor.Text,Encoding.UTF8);
+            File.Move(temporary,path,true);
+            LogDiagnostic("PRO","Saved "+currentDocument);
+        });
+        Add("EXPORT TXT",()=>{
+            var dialog=new SaveFileDialog { Filter="Text file|*.txt",FileName=
+                (string.IsNullOrEmpty(currentDocument)?"KYMA_PRO_REPORT":currentDocument)+".txt" };
+            if(dialog.ShowDialog()==true)File.WriteAllText(dialog.FileName,editor.Text,Encoding.UTF8);
+        });
+        Add("BACKUP PRO",()=>{
+            var dialog=new SaveFileDialog { Filter="ZIP archive|*.zip",FileName="KYMA_PRO_BACKUP_"+DateTime.Now.ToString("yyyyMMdd_HHmm")+".zip" };
+            if(dialog.ShowDialog()!=true)return;
+            if(File.Exists(dialog.FileName))File.Delete(dialog.FileName);
+            System.IO.Compression.ZipFile.CreateFromDirectory(proDataDirectory,dialog.FileName);
+            LogDiagnostic("PRO","PRO documents backup created");
+        });
+        Add("RESTORE PRO",()=>{
+            var dialog=new OpenFileDialog { Filter="ZIP archive|*.zip" };
+            if(dialog.ShowDialog()!=true)return;
+            if(MessageBox.Show("Επαναφορά PRO εγγράφων από backup; Τα υπάρχοντα αρχεία μπορεί να αντικατασταθούν.",
+                "KYMA PRO",MessageBoxButton.YesNo,MessageBoxImage.Warning)!=MessageBoxResult.Yes)return;
+            // Only plain top-level TXT documents are restored, preventing ZIP path traversal.
+            using var archive=System.IO.Compression.ZipFile.OpenRead(dialog.FileName);
+            foreach(var entry in archive.Entries){
+                if(entry.FullName.Contains('/')||entry.FullName.Contains('\\')||
+                   !entry.Name.EndsWith(".txt",StringComparison.OrdinalIgnoreCase))continue;
+                string destination=System.IO.Path.Combine(proDataDirectory,entry.Name);
+                entry.ExtractToFile(destination,true);
+            }
+            currentDocument="";editor.Text="Η επαναφορά ολοκληρώθηκε. Άνοιξε ξανά το έγγραφο.";
+            LogDiagnostic("PRO","PRO documents restored from backup");
+        });
+        w.Show();
+    }
     private void OpenDiagnostics() {
         if(diagnosticsWindow!=null){diagnosticsWindow.Activate();return;}
         var w=new Window { Title="KYMA | DEBUG / DIAGNOSTICS",Width=900,Height=580,MinWidth=580,MinHeight=350,
@@ -186,6 +315,7 @@ public partial class MainWindow : Window
                 Background=new SolidColorBrush(Color.FromRgb(40,69,94)),Foreground=Brushes.White };
             button.Click+=(_,_)=>action();bar.Children.Add(button);return button;
         }
+        Action("KYMA PRO",OpenProOperations);
         Action("CLOCK PREVIEW",OpenClockPreview);
         Action("TEST NAS NEXT",()=>{
             int next=FindUpcomingIndex();
