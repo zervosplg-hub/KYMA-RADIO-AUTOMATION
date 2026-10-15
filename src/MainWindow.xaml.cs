@@ -161,7 +161,7 @@ public partial class MainWindow : Window
             ContextMenu.Items.Add(debugMenu);
         }
         LogDiagnostic("STARTUP","UI initialized");
-        Title="KYMA RADIO AUTOMATION | SOHO Professional 2.8.2 BETA";
+        Title="KYMA RADIO AUTOMATION | SOHO Professional 2.8.3 BETA";
         EnableVirtualizedLists();
         Loaded += (_,_)=>{UpdateVersionLabels(this);LogDiagnostic("STARTUP",$"Window loaded in {startupClock.ElapsedMilliseconds} ms; library={library.Count:N0}; queue={queue.Count:N0}");};
         Dispatcher.UnhandledException+=(_,e)=>{LogDiagnostic("ERROR","Unhandled UI exception: "+e.Exception);};
@@ -204,7 +204,7 @@ public partial class MainWindow : Window
         for(int i=0;i<VisualTreeHelper.GetChildrenCount(root);i++){
             var child=VisualTreeHelper.GetChild(root,i);
             if(child is TextBlock label && label.Text.Contains("BROADCAST CONSOLE v2.2.1 BETA"))
-                label.Text=label.Text.Replace("v2.2.1 BETA","v2.8.2 BETA");
+                label.Text=label.Text.Replace("v2.2.1 BETA","v2.8.3 BETA");
             UpdateVersionLabels(child);
         }
     }
@@ -426,7 +426,7 @@ public partial class MainWindow : Window
                 .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
             int checkedCount=0;
             string currentPath="";
-            var progress=new Progress<(int count,string path)>(p=>{
+            IProgress<(int count,string path)> progress=new Progress<(int count,string path)>(p=>{
                 checkedCount=p.count;currentPath=p.path;
                 StatusText.Text=$"CLEAN: {p.count:N0}/{paths.Length:N0} · {watch.Elapsed:mm\\:ss}";
                 if(p.count%1000==0||p.count==paths.Length)
