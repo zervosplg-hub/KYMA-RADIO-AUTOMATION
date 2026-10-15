@@ -99,6 +99,81 @@ public partial class MainWindow : Window
             diagnosticsText.ScrollToEnd();
         }
     }
+    // KYMA PRO: first scheduling module. Preview is read-only and cannot alter ON AIR.
+    private void OpenClockPreview() {
+        var w=new Window {
+            Title="KYMA PRO | ΩΡΙΑΙΟ CLOCK / ΠΡΟΕΠΙΣΚΟΠΗΣΗ",
+            Width=850,Height=620,MinWidth=620,MinHeight=400,
+            Background=new SolidColorBrush(Color.FromRgb(17,25,36)),
+            Foreground=Brushes.White,Owner=this,
+            WindowStartupLocation=WindowStartupLocation.CenterOwner
+        };
+        var root=new DockPanel { Margin=new Thickness(16) };
+        var heading=new TextBlock {
+            Text="ΩΡΙΑΙΟΣ ΠΡΟΓΡΑΜΜΑΤΙΣΜΟΣ · ΔΟΚΙΜΑΣΤΙΚΗ ΠΡΟΕΠΙΣΚΟΠΗΣΗ",
+            FontSize=17,FontWeight=FontWeights.Bold,Foreground=Brushes.White,
+            Margin=new Thickness(0,0,0,10)
+        };
+        DockPanel.SetDock(heading,Dock.Top);root.Children.Add(heading);
+        var explanation=new TextBlock {
+            Text="Δημιουργεί ενδεικτικό ωριαίο log από την τρέχουσα playlist. Δεν αλλάζει την εκπομπή. Οι διάρκειες είναι εκτιμήσεις μέχρι να υπάρχουν πλήρη metadata.",
+            TextWrapping=TextWrapping.Wrap,Foreground=new SolidColorBrush(Color.FromRgb(173,195,215)),
+            Margin=new Thickness(0,0,0,12)
+        };
+        DockPanel.SetDock(explanation,Dock.Top);root.Children.Add(explanation);
+        var actions=new StackPanel { Orientation=Orientation.Horizontal,Margin=new Thickness(0,0,0,10) };
+        var generate=new Button { Content="ΔΗΜΙΟΥΡΓΙΑ CLOCK",Padding=new Thickness(14,8,14,8) };
+        var copy=new Button { Content="ΑΝΤΙΓΡΑΦΗ LOG",Padding=new Thickness(14,8,14,8) };
+        actions.Children.Add(generate);actions.Children.Add(copy);
+        DockPanel.SetDock(actions,Dock.Top);root.Children.Add(actions);
+        var output=new TextBox {
+            IsReadOnly=true,AcceptsReturn=true,TextWrapping=TextWrapping.NoWrap,
+            VerticalScrollBarVisibility=ScrollBarVisibility.Auto,
+            HorizontalScrollBarVisibility=ScrollBarVisibility.Auto,
+            FontFamily=new FontFamily("Consolas"),FontSize=13
+        };
+        root.Children.Add(output);w.Content=root;
+        generate.Click+=async (_,_)=>{
+            if(queue.Count==0){output.Text="Η playlist είναι κενή.";return;}
+            generate.IsEnabled=false;output.Text="Δημιουργία προεπισκόπησης...";
+            // Snapshot on UI thread; file metadata and selection stay off the dispatcher.
+            var snapshot=queue.Select(x=>(x.Path,x.Display)).ToArray();
+            var durations=new Dictionary<string,double>(decodedDurations,StringComparer.OrdinalIgnoreCase);
+            DateTime hour=DateTime.Now.Date.AddHours(DateTime.Now.Hour+1);
+            try {
+                string report=await Task.Run(()=>{
+                    var sb=new StringBuilder();
+                    sb.AppendLine("KYMA PRO · CLOCK PREVIEW · "+hour.ToString("dd/MM/yyyy HH:mm"));
+                    sb.AppendLine("----------------------------------------------------------");
+                    double elapsed=0;int selected=0;int missing=0;
+                    var used=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    for(int i=0;i<snapshot.Length&&elapsed<3600;i++){
+                        var item=snapshot[i];
+                        if(!File.Exists(item.Path)){missing++;continue;}
+                        if(!used.Add(item.Path))continue;
+                        double seconds=durations.TryGetValue(item.Path,out var d)&&d>0?d:180;
+                        seconds=Math.Clamp(seconds,1,3600);
+                        if(elapsed+seconds>3600 && selected>0)break;
+                        sb.AppendLine(hour.AddSeconds(elapsed).ToString("HH:mm:ss")+"  "+
+                            item.Display+"  ["+TimeSpan.FromSeconds(seconds).ToString(@"mm\\:ss")+"]"+
+                            (durations.ContainsKey(item.Path)?"":" (εκτίμηση)"));
+                        elapsed+=seconds;selected++;
+                    }
+                    sb.AppendLine("----------------------------------------------------------");
+                    sb.AppendLine("Στοιχεία: "+selected+" · διάρκεια "+TimeSpan.FromSeconds(elapsed).ToString(@"hh\\:mm\\:ss")+
+                        " · κενός χρόνος "+TimeSpan.FromSeconds(Math.Max(0,3600-elapsed)).ToString(@"mm\\:ss")+
+                        " · μη διαθέσιμα αρχεία "+missing);
+                    sb.AppendLine("PREVIEW ONLY — Δεν έχει δημιουργηθεί εκτελέσιμο πρόγραμμα.");
+                    return sb.ToString();
+                });
+                output.Text=report;
+                LogDiagnostic("SCHEDULER","Hourly clock preview generated (no on-air changes)");
+            }catch(Exception ex){output.Text="Σφάλμα προεπισκόπησης: "+ex.Message;LogDiagnostic("ERROR","Clock preview: "+ex);}
+            finally{generate.IsEnabled=true;}
+        };
+        copy.Click+=(_,_)=>{if(!string.IsNullOrEmpty(output.Text))Clipboard.SetText(output.Text);};
+        w.Show();
+    }
     private void OpenDiagnostics() {
         if(diagnosticsWindow!=null){diagnosticsWindow.Activate();return;}
         var w=new Window { Title="KYMA | DEBUG / DIAGNOSTICS",Width=900,Height=580,MinWidth=580,MinHeight=350,
@@ -111,6 +186,7 @@ public partial class MainWindow : Window
                 Background=new SolidColorBrush(Color.FromRgb(40,69,94)),Foreground=Brushes.White };
             button.Click+=(_,_)=>action();bar.Children.Add(button);return button;
         }
+        Action("CLOCK PREVIEW",OpenClockPreview);
         Action("TEST NAS NEXT",()=>{
             int next=FindUpcomingIndex();
             if(next>=0)DiagnoseSlowNasFile(queue[next].Path,0);
