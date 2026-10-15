@@ -97,7 +97,7 @@ public partial class MainWindow : Window
         searchDebounce.Tick += (_,_) => { searchDebounce.Stop(); RefreshLibrary(); };
         saveDebounce.Tick += (_,_)=>{saveDebounce.Stop();if(fading){pendingStateSave=true;return;}FlushState();};
         ConfigureAudioMenus();
-        Title="KYMA RADIO AUTOMATION | SOHO Professional 2.7.1 BETA";
+        Title="KYMA RADIO AUTOMATION | SOHO Professional 2.7.2 BETA";
         EnableVirtualizedLists();
         Loaded += (_,_)=>UpdateVersionLabels(this);
         player.MediaEnded += Player_MediaEnded;
@@ -129,7 +129,7 @@ public partial class MainWindow : Window
         for(int i=0;i<VisualTreeHelper.GetChildrenCount(root);i++){
             var child=VisualTreeHelper.GetChild(root,i);
             if(child is TextBlock label && label.Text.Contains("BROADCAST CONSOLE v2.2.1 BETA"))
-                label.Text=label.Text.Replace("v2.2.1 BETA","v2.7.1 BETA");
+                label.Text=label.Text.Replace("v2.2.1 BETA","v2.7.2 BETA");
             UpdateVersionLabels(child);
         }
     }
@@ -329,15 +329,41 @@ public partial class MainWindow : Window
         RepeatButton.Content=repeatPlaylist?"REPEAT ON":"REPEAT OFF";
         RepeatButton.Background=new SolidColorBrush(repeatPlaylist?Color.FromRgb(25,118,52):Color.FromRgb(70,74,90));
     }
-    private void RemoveMissing_Click(object s,RoutedEventArgs e) {
-        int removed=0;
-        for(int i=library.Count-1;i>=0;i--)if(!File.Exists(library[i].Path)){libraryPaths.Remove(library[i].Path);library.RemoveAt(i);removed++;}
-        for(int i=queue.Count-1;i>=0;i--)if(!File.Exists(queue[i].Path)){
-            if(i==activeIndex){StopPlayback();activeIndex=-1;}
-            else if(i<activeIndex)activeIndex--;
-            queue.RemoveAt(i);
-        }
-        RefreshLibrary();UpdateNext();SaveState();StatusText.Text=$"MISSING FILES REMOVED: {removed}";
+    private bool cleaningLibrary = false;
+    private async void RemoveMissing_Click(object s,RoutedEventArgs e) {
+        if(cleaningLibrary)return;
+        cleaningLibrary=true;
+        StatusText.Text="CLEAN: έλεγχος αρχείων στο παρασκήνιο...";
+        try {
+            // Check disk/network paths away from the WPF UI thread.
+            var paths=library.Select(t=>t.Path).Concat(queue.Select(t=>t.Path))
+                .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+            var missing=await Task.Run(()=>{
+                var result=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach(var path in paths){
+                    try { if(!File.Exists(path))result.Add(path); }
+                    catch { result.Add(path); }
+                }
+                return result;
+            });
+            int removed=0;
+            for(int i=library.Count-1;i>=0;i--)
+                if(missing.Contains(library[i].Path)){
+                    libraryPaths.Remove(library[i].Path);
+                    library.RemoveAt(i);
+                    removed++;
+                }
+            for(int i=queue.Count-1;i>=0;i--)
+                if(missing.Contains(queue[i].Path)){
+                    if(i==activeIndex){StopPlayback();activeIndex=-1;}
+                    else if(i<activeIndex)activeIndex--;
+                    queue.RemoveAt(i);
+                }
+            RefreshLibrary();UpdateNext();
+            if(removed>0||missing.Count>0)SaveState();
+            StatusText.Text=$"CLEAN OK: {removed:N0} αρχεία αφαιρέθηκαν · {paths.Length:N0} ελέγχθηκαν";
+        } catch(Exception ex){StatusText.Text="CLEAN ERROR: "+ex.Message;}
+        finally{cleaningLibrary=false;}
     }
     private void ClearHistory_Click(object s,RoutedEventArgs e) {
         if(history.Count==0)return;
