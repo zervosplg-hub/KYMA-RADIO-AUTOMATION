@@ -14,7 +14,11 @@ using System.Windows.Shapes;
 using System.Windows.Media.Imaging;
 using Microsoft.Win32;
 namespace KymaSoho;
-public sealed class Track { public string Path { get; set; } = ""; public string Display => System.IO.Path.GetFileNameWithoutExtension(Path); }
+public sealed class Track {
+    public string Path { get; set; } = "";
+    public string Display => System.IO.Path.GetFileNameWithoutExtension(Path);
+    public string SearchText => (Display+" "+Path).ToUpperInvariant();
+}
 public partial class MainWindow : Window
 {
     private readonly ObservableCollection<Track> library = new();
@@ -83,7 +87,8 @@ public partial class MainWindow : Window
         searchDebounce.Tick += (_,_) => { searchDebounce.Stop(); RefreshLibrary(); };
         saveDebounce.Tick += (_,_)=>{saveDebounce.Stop();if(fading){pendingStateSave=true;return;}FlushState();};
         ConfigureAudioMenus();
-        Title="KYMA RADIO AUTOMATION | SOHO Professional 2.6.1 BETA";
+        Title="KYMA RADIO AUTOMATION | SOHO Professional 2.7 BETA";
+        EnableVirtualizedLists();
         Loaded += (_,_)=>UpdateVersionLabels(this);
         player.MediaEnded += Player_MediaEnded;
         incomingPlayer.MediaEnded += Player_MediaEnded;
@@ -114,8 +119,16 @@ public partial class MainWindow : Window
         for(int i=0;i<VisualTreeHelper.GetChildrenCount(root);i++){
             var child=VisualTreeHelper.GetChild(root,i);
             if(child is TextBlock label && label.Text.Contains("BROADCAST CONSOLE v2.2.1 BETA"))
-                label.Text=label.Text.Replace("v2.2.1 BETA","v2.6.1 BETA");
+                label.Text=label.Text.Replace("v2.2.1 BETA","v2.7 BETA");
             UpdateVersionLabels(child);
+        }
+    }
+    private void EnableVirtualizedLists() {
+        foreach(var list in new[]{LibraryList,LibraryListA,LibraryListB,QueueList,HistoryList}){
+            VirtualizingStackPanel.SetIsVirtualizing(list,true);
+            VirtualizingStackPanel.SetVirtualizationMode(list,VirtualizationMode.Recycling);
+            ScrollViewer.SetCanContentScroll(list,true);
+            ScrollViewer.SetIsDeferredScrollingEnabled(list,true);
         }
     }
     private void RefreshLibrary() {
@@ -123,10 +136,12 @@ public partial class MainWindow : Window
         refreshingLibrary=true;
         try {
             var term=SearchBox.Text.Trim();
-            var matches=string.IsNullOrWhiteSpace(term)?library.ToArray():library.Where(t=>t.Display.Contains(term,StringComparison.CurrentCultureIgnoreCase)||t.Path.Contains(term,StringComparison.CurrentCultureIgnoreCase)).ToArray();
+            var matches=string.IsNullOrWhiteSpace(term)?library.ToArray():library.Where(t=>t.SearchText.Contains(term.ToUpperInvariant(),StringComparison.Ordinal)).ToArray();
             var selectedPath=(LibraryList.SelectedItem as Track)?.Path;
             // ObservableCollection mutations must occur outside CollectionView.DeferRefresh.
             // DeferRefresh prohibits changes to the view's source collection in WPF.
+            // Reset the view once, rather than notifying WPF for every item.
+            // This keeps the virtualized list responsive with large music libraries.
             filtered.Clear();
             foreach(var track in matches)filtered.Add(track);
             if(selectedPath!=null){
