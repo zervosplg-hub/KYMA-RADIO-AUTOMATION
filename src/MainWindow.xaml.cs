@@ -233,11 +233,11 @@ public partial class MainWindow : Window
                         string p=System.IO.Path.Combine(proPath,name+".txt");
                         return File.Exists(p)?File.ReadAllText(p):fallback;
                     }
-                    var categoryLines=Read("CATEGORIES","GOLD\\nCURRENT\\nGREEK\\nINTERNATIONAL\\nJINGLES").Split('\\n')
+                    var categoryLines=Read("CATEGORIES","GOLD\\nCURRENT\\nGREEK\\nINTERNATIONAL\\nJINGLES").Split('\n')
                         .Select(x=>x.Trim()).Where(x=>x.Length>0&&!x.StartsWith("#")).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
                     var rules=Read("ROTATION","ARTIST_SEPARATION_MIN=90\\nTITLE_SEPARATION_MIN=240");
                     int artistGap=90,titleGap=240;
-                    foreach(var line in rules.Split('\\n')){
+                    foreach(var line in rules.Split('\n')){
                         var parts=line.Trim().Split('=',2);
                         if(parts.Length!=2||!int.TryParse(parts[1].Trim(),out var minutes))continue;
                         if(parts[0].Trim().Equals("ARTIST_SEPARATION_MIN",StringComparison.OrdinalIgnoreCase))artistGap=Math.Clamp(minutes,0,1440);
@@ -246,14 +246,14 @@ public partial class MainWindow : Window
                     // Category mapping is explicit: "CATEGORY|substring" per line, or ALL by default.
                     var mapLines=Read("CATEGORY_MAP","# CATEGORY|filename substring\\n");
                     var mappings=new List<(string category,string token)>();
-                    foreach(var line in mapLines.Split('\\n')){
+                    foreach(var line in mapLines.Split('\n')){
                         var parts=line.Trim().Split('|',2);
                         if(parts.Length==2&&parts[0].Length>0&&parts[1].Length>0)
                             mappings.Add((parts[0].Trim(),parts[1].Trim()));
                     }
                     var clockText=Read("CLOCKS","00:00 MUSIC\\n00:15 JINGLE\\n00:30 MUSIC\\n00:45 STATION ID");
                     var slots=new List<(int minute,string category)>();
-                    foreach(var line in clockText.Split('\\n')){
+                    foreach(var line in clockText.Split('\n')){
                         var parts=line.Trim().Split(' ',2,StringSplitOptions.RemoveEmptyEntries);
                         if(parts.Length!=2||!TimeSpan.TryParse(parts[0],out var slot))continue;
                         if(slot.TotalMinutes>=60||slot.TotalMinutes<0)continue;
