@@ -161,7 +161,7 @@ public partial class MainWindow : Window
             ContextMenu.Items.Add(debugMenu);
         }
         LogDiagnostic("STARTUP","UI initialized");
-        Title="KYMA RADIO AUTOMATION | SOHO Professional 2.8.3 BETA";
+        Title="KYMA RADIO AUTOMATION | SOHO Professional 2.9 BETA";
         EnableVirtualizedLists();
         Loaded += (_,_)=>{UpdateVersionLabels(this);LogDiagnostic("STARTUP",$"Window loaded in {startupClock.ElapsedMilliseconds} ms; library={library.Count:N0}; queue={queue.Count:N0}");};
         Dispatcher.UnhandledException+=(_,e)=>{LogDiagnostic("ERROR","Unhandled UI exception: "+e.Exception);};
@@ -204,7 +204,7 @@ public partial class MainWindow : Window
         for(int i=0;i<VisualTreeHelper.GetChildrenCount(root);i++){
             var child=VisualTreeHelper.GetChild(root,i);
             if(child is TextBlock label && label.Text.Contains("BROADCAST CONSOLE v2.2.1 BETA"))
-                label.Text=label.Text.Replace("v2.2.1 BETA","v2.8.3 BETA");
+                label.Text=label.Text.Replace("v2.2.1 BETA","v2.9 BETA");
             UpdateVersionLabels(child);
         }
     }
@@ -419,31 +419,43 @@ public partial class MainWindow : Window
         if(cleaningLibrary)return;
         cleaningLibrary=true;
         var watch=Stopwatch.StartNew();
-        LogDiagnostic("CLEAN","Missing file scan started");
-        StatusText.Text="CLEAN: έλεγχος αρχείων στο παρασκήνιο...";
+        LogDiagnostic("CLEAN","Fast folder-based scan started");
+        StatusText.Text="CLEAN: γρήγορος έλεγχος φακέλων...";
         try {
             var paths=library.Select(t=>t.Path).Concat(queue.Select(t=>t.Path))
                 .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
-            int checkedCount=0;
-            string currentPath="";
-            IProgress<(int count,string path)> progress=new Progress<(int count,string path)>(p=>{
-                checkedCount=p.count;currentPath=p.path;
-                StatusText.Text=$"CLEAN: {p.count:N0}/{paths.Length:N0} · {watch.Elapsed:mm\\:ss}";
-                if(p.count%1000==0||p.count==paths.Length)
-                    LogDiagnostic("CLEAN",$"Progress {p.count:N0}/{paths.Length:N0} in {watch.Elapsed:mm\\:ss}; last={p.path}");
-            });
-            var missing=await Task.Run(()=>{
-                var result=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                for(int i=0;i<paths.Length;i++){
-                    var file=paths[i];
-                    try {if(!File.Exists(file))result.Add(file);}
-                    catch {result.Add(file);}
-                    if((i+1)%250==0||i==paths.Length-1)progress.Report((i+1,file));
+            var folderGroups=paths.GroupBy(p=>System.IO.Path.GetDirectoryName(p)??"",
+                StringComparer.OrdinalIgnoreCase).ToArray();
+            IProgress<(int count,int total,int missing,int skipped)> progress=
+                new Progress<(int count,int total,int missing,int skipped)>(p=>{
+                    StatusText.Text=$"CLEAN: {p.count:N0}/{p.total:N0} φάκελοι · {watch.Elapsed:mm\\:ss}";
+                    if(p.count%100==0||p.count==p.total)
+                        LogDiagnostic("CLEAN",$"Folders {p.count:N0}/{p.total:N0}, missing={p.missing:N0}, inaccessible={p.skipped:N0}, elapsed={watch.Elapsed:mm\\:ss}");
+                });
+            var result=await Task.Run(()=>{
+                var missing=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                int skipped=0;
+                int processed=0;
+                foreach(var group in folderGroups){
+                    try {
+                        // Enumerate only the immediate directory, not its entire subtree.
+                        // If enumeration fails, preserve every library entry in that folder.
+                        var existing=new HashSet<string>(
+                            Directory.EnumerateFiles(group.Key),StringComparer.OrdinalIgnoreCase);
+                        foreach(var path in group)
+                            if(!existing.Contains(path))missing.Add(path);
+                    } catch(Exception ex) when(ex is IOException||ex is UnauthorizedAccessException||
+                        ex is ArgumentException||ex is NotSupportedException||ex is System.Security.SecurityException){
+                        skipped++;
+                    }
+                    processed++;
+                    if(processed%25==0||processed==folderGroups.Length)
+                        progress.Report((processed,folderGroups.Length,missing.Count,skipped));
                 }
-                return result;
+                return (missing,skipped);
             });
-            LogDiagnostic("CLEAN",$"Disk scan finished in {watch.ElapsedMilliseconds} ms; {missing.Count:N0} missing; updating lists");
-            var kept=library.Where(t=>!missing.Contains(t.Path)).ToArray();
+            LogDiagnostic("CLEAN",$"Folder scan finished in {watch.ElapsedMilliseconds} ms; {folderGroups.Length:N0} folders; {result.missing.Count:N0} missing; {result.skipped:N0} inaccessible");
+            var kept=library.Where(t=>!result.missing.Contains(t.Path)).ToArray();
             int removed=library.Count-kept.Length;
             if(removed>0){
                 library.Clear();
@@ -452,16 +464,16 @@ public partial class MainWindow : Window
                 foreach(var track in kept)libraryPaths.Add(track.Path);
             }
             for(int i=queue.Count-1;i>=0;i--)
-                if(missing.Contains(queue[i].Path)){
+                if(result.missing.Contains(queue[i].Path)){
                     if(i==activeIndex){StopPlayback();activeIndex=-1;}
                     else if(i<activeIndex)activeIndex--;
                     queue.RemoveAt(i);
                 }
             if(removed>0)RefreshLibrary();
             UpdateNext();
-            if(removed>0||missing.Count>0)SaveState();
-            StatusText.Text=$"CLEAN OK: {removed:N0} αρχεία αφαιρέθηκαν · {paths.Length:N0} ελέγχθηκαν";
-            LogDiagnostic("CLEAN",$"Completed {paths.Length:N0} checks, removed {removed:N0} in {watch.Elapsed:mm\\:ss}");
+            if(result.missing.Count>0)SaveState();
+            StatusText.Text=$"CLEAN OK: {removed:N0} αφαιρέθηκαν · {folderGroups.Length:N0} φάκελοι · {result.skipped:N0} μη προσβάσιμοι";
+            LogDiagnostic("CLEAN",$"Completed in {watch.Elapsed:mm\\:ss}; {paths.Length:N0} entries; removed={removed:N0}; inaccessible folders={result.skipped:N0}");
         } catch(Exception ex){StatusText.Text="CLEAN ERROR: "+ex.Message;LogDiagnostic("ERROR","Clean: "+ex);}
         finally{cleaningLibrary=false;}
     }
