@@ -178,6 +178,171 @@ public partial class MainWindow : Window
     // PRO Operations: independent management tools, isolated from the on-air engine.
     private readonly string proDataDirectory=System.IO.Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"KYMA_SOHO","PRO");
+
+    // KYMA PRO offline scheduling: generates a real plan, never changes live playout.
+    private void OpenProScheduler(){
+        var w=new Window { Title="KYMA PRO | MUSIC SCHEDULER / FINAL LOG",
+            Width=1030,Height=700,MinWidth=700,MinHeight=470,Owner=this,
+            Background=new SolidColorBrush(Color.FromRgb(17,25,36)),
+            Foreground=Brushes.White,WindowStartupLocation=WindowStartupLocation.CenterOwner };
+        var root=new DockPanel { Margin=new Thickness(14) };
+        var title=new TextBlock { Text="MUSIC SCHEDULER  ·  OFFLINE FINAL LOG",
+            FontWeight=FontWeights.Bold,FontSize=19,Margin=new Thickness(0,0,0,8) };
+        DockPanel.SetDock(title,Dock.Top);root.Children.Add(title);
+        var notice=new TextBlock { Text="Προγραμματισμός από τις αποθηκευμένες κατηγορίες, clocks και rotation rules. Δεν μεταβάλλει το ON AIR. Η αυτόματη εκτέλεση δεν είναι ενεργή.",
+            TextWrapping=TextWrapping.Wrap,Margin=new Thickness(0,0,0,10),
+            Foreground=new SolidColorBrush(Color.FromRgb(164,196,220)) };
+        DockPanel.SetDock(notice,Dock.Top);root.Children.Add(notice);
+        var controls=new WrapPanel { Margin=new Thickness(0,0,0,10) };
+        var startLabel=new TextBlock { Text="Ώρα:",VerticalAlignment=VerticalAlignment.Center,Margin=new Thickness(0,0,5,0) };
+        var startHour=new ComboBox { Width=85,Margin=new Thickness(0,0,12,0) };
+        for(int i=0;i<24;i++)startHour.Items.Add(i.ToString("00")+":00");
+        startHour.SelectedIndex=DateTime.Now.Hour;
+        var hoursLabel=new TextBlock { Text="Ώρες:",VerticalAlignment=VerticalAlignment.Center,Margin=new Thickness(0,0,5,0) };
+        var countHours=new ComboBox { Width=65,Margin=new Thickness(0,0,12,0) };
+        foreach(int n in new[]{1,2,4,6,12,24})countHours.Items.Add(n.ToString());
+        countHours.SelectedIndex=0;
+        var generate=new Button { Content="GENERATE FINAL LOG",Padding=new Thickness(12,8,12,8) };
+        var export=new Button { Content="EXPORT CSV",Padding=new Thickness(12,8,12,8) };
+        var apply=new Button { Content="APPEND TO PLAYLIST",Padding=new Thickness(12,8,12,8) };
+        controls.Children.Add(startLabel);controls.Children.Add(startHour);
+        controls.Children.Add(hoursLabel);controls.Children.Add(countHours);
+        controls.Children.Add(generate);controls.Children.Add(export);controls.Children.Add(apply);
+        DockPanel.SetDock(controls,Dock.Top);root.Children.Add(controls);
+        var output=new TextBox { IsReadOnly=true,AcceptsReturn=true,
+            FontFamily=new FontFamily("Consolas"),FontSize=12,
+            VerticalScrollBarVisibility=ScrollBarVisibility.Auto,
+            HorizontalScrollBarVisibility=ScrollBarVisibility.Auto };
+        root.Children.Add(output);w.Content=root;
+        var generated=new List<(DateTime time,string path,string category,double duration)>();
+        string csv="";
+        generate.Click+=async (_,_)=>{
+            generate.IsEnabled=false;apply.IsEnabled=false;
+            output.Text="Δημιουργία προγράμματος...";
+            generated.Clear();csv="";
+            var snapshot=library.Select(t=>t.Path).ToArray();
+            var durations=new Dictionary<string,double>(decodedDurations,StringComparer.OrdinalIgnoreCase);
+            int hour=startHour.SelectedIndex;
+            int number=int.Parse((string)countHours.SelectedItem);
+            DateTime beginning=DateTime.Today.AddHours(hour);
+            string proPath=proDataDirectory;
+            try {
+                var result=await Task.Run(()=>{
+                    string Read(string name,string fallback){
+                        string p=System.IO.Path.Combine(proPath,name+".txt");
+                        return File.Exists(p)?File.ReadAllText(p):fallback;
+                    }
+                    var categoryLines=Read("CATEGORIES","GOLD\\nCURRENT\\nGREEK\\nINTERNATIONAL\\nJINGLES").Split('\\n')
+                        .Select(x=>x.Trim()).Where(x=>x.Length>0&&!x.StartsWith("#")).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+                    var rules=Read("ROTATION","ARTIST_SEPARATION_MIN=90\\nTITLE_SEPARATION_MIN=240");
+                    int artistGap=90,titleGap=240;
+                    foreach(var line in rules.Split('\\n')){
+                        var parts=line.Trim().Split('=',2);
+                        if(parts.Length!=2||!int.TryParse(parts[1].Trim(),out var minutes))continue;
+                        if(parts[0].Trim().Equals("ARTIST_SEPARATION_MIN",StringComparison.OrdinalIgnoreCase))artistGap=Math.Clamp(minutes,0,1440);
+                        if(parts[0].Trim().Equals("TITLE_SEPARATION_MIN",StringComparison.OrdinalIgnoreCase))titleGap=Math.Clamp(minutes,0,1440);
+                    }
+                    // Category mapping is explicit: "CATEGORY|substring" per line, or ALL by default.
+                    var mapLines=Read("CATEGORY_MAP","# CATEGORY|filename substring\\n");
+                    var mappings=new List<(string category,string token)>();
+                    foreach(var line in mapLines.Split('\\n')){
+                        var parts=line.Trim().Split('|',2);
+                        if(parts.Length==2&&parts[0].Length>0&&parts[1].Length>0)
+                            mappings.Add((parts[0].Trim(),parts[1].Trim()));
+                    }
+                    var clockText=Read("CLOCKS","00:00 MUSIC\\n00:15 JINGLE\\n00:30 MUSIC\\n00:45 STATION ID");
+                    var slots=new List<(int minute,string category)>();
+                    foreach(var line in clockText.Split('\\n')){
+                        var parts=line.Trim().Split(' ',2,StringSplitOptions.RemoveEmptyEntries);
+                        if(parts.Length!=2||!TimeSpan.TryParse(parts[0],out var slot))continue;
+                        if(slot.TotalMinutes>=60||slot.TotalMinutes<0)continue;
+                        slots.Add(((int)slot.TotalMinutes,parts[1].Trim().ToUpperInvariant()));
+                    }
+                    if(slots.Count==0)slots.Add((0,"MUSIC"));
+                    slots=slots.OrderBy(x=>x.minute).ToList();
+                    var candidates=new List<(string path,string artist,string category,double duration)>();
+                    int missing=0;
+                    foreach(string path in snapshot){
+                        if(!File.Exists(path)){missing++;continue;}
+                        string name=System.IO.Path.GetFileNameWithoutExtension(path);
+                        string artist=name.Split(new[]{" - "," – "},StringSplitOptions.None)[0].Trim();
+                        string category=mappings.FirstOrDefault(m=>name.Contains(m.token,StringComparison.OrdinalIgnoreCase)).category??"MUSIC";
+                        double duration=durations.TryGetValue(path,out var known)&&known>0?known:180;
+                        candidates.Add((path,artist,category,Math.Clamp(duration,1,3600)));
+                    }
+                    var entries=new List<(DateTime time,string path,string category,double duration)>();
+                    var lastTitle=new Dictionary<string,DateTime>(StringComparer.OrdinalIgnoreCase);
+                    var lastArtist=new Dictionary<string,DateTime>(StringComparer.OrdinalIgnoreCase);
+                    var sb=new StringBuilder();
+                    sb.AppendLine("KYMA PRO FINAL LOG | "+beginning.ToString("dd/MM/yyyy HH:mm")+" | "+number+"h");
+                    sb.AppendLine("--------------------------------------------------------------");
+                    int cursor=0,violations=0;
+                    for(int h=0;h<number;h++){
+                        var hourStart=beginning.AddHours(h);
+                        foreach(var slot in slots){
+                            DateTime planned=hourStart.AddMinutes(slot.minute);
+                            string desired=slot.category;
+                            bool matches((string path,string artist,string category,double duration) c)=>
+                                desired=="MUSIC"||desired=="ALL"||
+                                (desired=="JINGLE"&&c.category=="JINGLES")||
+                                string.Equals(c.category,desired,StringComparison.OrdinalIgnoreCase);
+                            int selected=-1;
+                            for(int attempt=0;attempt<candidates.Count;attempt++){
+                                int index=(cursor+attempt)%candidates.Count;
+                                var c=candidates[index];
+                                if(!matches(c))continue;
+                                if(lastTitle.TryGetValue(c.path,out var lastT)&&(planned-lastT).TotalMinutes<titleGap)continue;
+                                if(lastArtist.TryGetValue(c.artist,out var lastA)&&(planned-lastA).TotalMinutes<artistGap)continue;
+                                selected=index;break;
+                            }
+                            if(selected<0){violations++;sb.AppendLine(planned.ToString("HH:mm")+"  UNFILLED "+desired+" (rotation/category)");continue;}
+                            var chosen=candidates[selected];cursor=(selected+1)%candidates.Count;
+                            lastTitle[chosen.path]=planned;lastArtist[chosen.artist]=planned;
+                            entries.Add((planned,chosen.path,desired,chosen.duration));
+                            sb.AppendLine(planned.ToString("HH:mm")+"  "+desired.PadRight(12)+
+                                " "+System.IO.Path.GetFileNameWithoutExtension(chosen.path)+
+                                " ["+TimeSpan.FromSeconds(chosen.duration).ToString(@"mm\\:ss")+"]");
+                        }
+                    }
+                    sb.AppendLine("--------------------------------------------------------------");
+                    sb.AppendLine($"Scheduled={entries.Count} · Unfilled={violations} · Missing files={missing} · Library={snapshot.Length}");
+                    sb.AppendLine("WARNING: slot-based plan; not a gapless broadcast-ready schedule.");
+                    var csvBuilder=new StringBuilder("PlannedTime,Category,DurationSeconds,Path\\r\\n");
+                    string Quote(string x)=>"\""+x.Replace("\"","\"\"")+"\"";
+                    foreach(var e in entries)csvBuilder.AppendLine(
+                        Quote(e.time.ToString("yyyy-MM-dd HH:mm:ss"))+","+
+                        Quote(e.category)+","+e.duration.ToString(System.Globalization.CultureInfo.InvariantCulture)+","+
+                        Quote(e.path));
+                    return (entries,sb.ToString(),csvBuilder.ToString());
+                });
+                generated=result.entries;output.Text=result.Item2;csv=result.Item3;
+                apply.IsEnabled=generated.Count>0;
+                LogDiagnostic("SCHEDULER",$"Generated {generated.Count} slots; {number} hours; no on-air changes");
+            }catch(Exception ex){output.Text="Scheduler error: "+ex.Message;LogDiagnostic("ERROR","PRO scheduler: "+ex);}
+            finally{generate.IsEnabled=true;}
+        };
+        export.Click+=(_,_)=>{
+            if(csv.Length==0)return;
+            var dialog=new SaveFileDialog { Filter="CSV files|*.csv",FileName="KYMA_FINAL_LOG_"+DateTime.Now.ToString("yyyyMMdd_HHmm")+".csv" };
+            if(dialog.ShowDialog()==true)File.WriteAllText(dialog.FileName,csv,new UTF8Encoding(true));
+        };
+        apply.IsEnabled=false;
+        apply.Click+=(_,_)=>{
+            if(generated.Count==0)return;
+            if(MessageBox.Show("Προσθήκη "+generated.Count+" εγγραφών στο ΤΕΛΟΣ της playlist; Δεν προγραμματίζει αυτόματη εκτέλεση.",
+                "KYMA PRO",MessageBoxButton.YesNo,MessageBoxImage.Question)!=MessageBoxResult.Yes)return;
+            int added=0;
+            var existing=new HashSet<string>(queue.Select(x=>x.Path),StringComparer.OrdinalIgnoreCase);
+            foreach(var entry in generated){
+                if(preventQueueDuplicates&&!existing.Add(entry.path))continue;
+                queue.Add(new Track { Path=entry.path });added++;
+            }
+            UpdateNext();SaveState();
+            LogDiagnostic("SCHEDULER",$"Appended {added} tracks manually to playlist");
+            MessageBox.Show("Προστέθηκαν "+added+" κομμάτια. Οι προγραμματισμένες ώρες δεν εφαρμόζονται στην αναπαραγωγή.","KYMA PRO");
+        };
+        w.Show();
+    }
     private void OpenProOperations(){
         Directory.CreateDirectory(proDataDirectory);
         var w=new Window { Title="KYMA RADIO AUTOMATION PRO | OPERATIONS",
@@ -229,6 +394,8 @@ public partial class MainWindow : Window
         // 3: category definitions
         Add("3 · CATEGORIES",()=>OpenDocument("CATEGORIES",
             "# Κατηγορίες\\nGOLD\\nCURRENT\\nGREEK\\nINTERNATIONAL\\nJINGLES\\n"));
+        Add("CATEGORY MAP",()=>OpenDocument("CATEGORY_MAP",
+            "# CATEGORY|filename substring (π.χ. JINGLES|Station ID)\\n"));
         // 4: commercial clients
         Add("4 · CLIENTS",()=>OpenDocument("CLIENTS",
             "# Πελάτες · ένα όνομα ανά γραμμή\\n"));
@@ -241,8 +408,8 @@ public partial class MainWindow : Window
         // 7: jingle and voice tracking rundown notes
         Add("7 · VOICE / JINGLES",()=>OpenDocument("VOICE_TRACKING",
             "# Σημειώσεις voice tracking / jingle placements\\n"));
-        // 8: planned hourly clock preview
-        Add("8 · CLOCK PREVIEW",OpenClockPreview);
+        // 8: real offline schedule generation and CSV export
+        Add("8 · FINAL LOG",OpenProScheduler);
         // 9: read-only real playback history
         Add("9 · AS-RUN",()=>{
             currentDocument="";
