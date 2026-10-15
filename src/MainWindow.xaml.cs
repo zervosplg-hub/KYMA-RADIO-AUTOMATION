@@ -571,6 +571,52 @@ public partial class MainWindow : Window
     private readonly ObservableCollection<Track> library = new();
     private readonly ObservableCollection<Track> queue = new();
     private readonly FastTrackCollection filtered = new();
+    private readonly FastTrackCollection filteredMusic = new();
+    private readonly FastTrackCollection filteredJingles = new();
+    private readonly Dictionary<string,string> mediaCategoryOverrides = new(StringComparer.OrdinalIgnoreCase);
+    private string CategoryOverridesFile => System.IO.Path.Combine(proDataDirectory,"MEDIA_CATEGORIES.tsv");
+    private string GetMediaCategory(string path){
+        if(mediaCategoryOverrides.TryGetValue(path,out var category))return category;
+        var segments=path.Replace('/','\\').Split('\\');
+        foreach(var segment in segments){
+            if(segment.Equals("JINGLES",StringComparison.OrdinalIgnoreCase)||segment.Equals("JINGLE",StringComparison.OrdinalIgnoreCase)||segment.Equals("IDS",StringComparison.OrdinalIgnoreCase))return "JINGLES";
+            if(segment.Equals("SPOTS",StringComparison.OrdinalIgnoreCase)||segment.Equals("COMMERCIALS",StringComparison.OrdinalIgnoreCase)||segment.Equals("ADS",StringComparison.OrdinalIgnoreCase))return "SPOTS";
+        }
+        return "MUSIC";
+    }
+    private void LoadMediaCategories(){
+        try{
+            if(!File.Exists(CategoryOverridesFile))return;
+            foreach(var line in File.ReadLines(CategoryOverridesFile)){
+                int split=line.IndexOf('\t');if(split<=0)continue;
+                string cat=line.Substring(0,split);
+                if(cat=="MUSIC"||cat=="JINGLES"||cat=="SPOTS")mediaCategoryOverrides[line.Substring(split+1)]=cat;
+            }
+        }catch(Exception ex){LogDiagnostic("ERROR","Media categories load: "+ex.Message);}
+    }
+    private void SetMediaCategory(Track track,string category){
+        mediaCategoryOverrides[track.Path]=category;
+        try{
+            Directory.CreateDirectory(proDataDirectory);
+            var temp=CategoryOverridesFile+".tmp";
+            File.WriteAllLines(temp,mediaCategoryOverrides.Select(kv=>kv.Value+"\t"+kv.Key),Encoding.UTF8);
+            File.Move(temp,CategoryOverridesFile,true);
+            RefreshLibrary();StatusText.Text="CATEGORY: "+category+" · "+track.Display;
+        }catch(Exception ex){LogDiagnostic("ERROR","Media category save: "+ex.Message);MessageBox.Show(ex.Message,"KYMA");}
+    }
+    private void ConfigureLibraryCategories(){
+        LoadMediaCategories();
+        foreach(var list in new[]{LibraryList,LibraryListA,LibraryListB}){
+            var menu=new ContextMenu();
+            foreach(var cat in new[]{"MUSIC","JINGLES","SPOTS"}){
+                string chosen=cat;
+                var item=new MenuItem{Header="Κατηγορία → "+cat};
+                item.Click+=(_,_)=>{if(list.SelectedItem is Track t)SetMediaCategory(t,chosen);};
+                menu.Items.Add(item);
+            }
+            list.ContextMenu=menu;
+        }
+    }
     private readonly ObservableCollection<string> history = new();
     private MediaPlayer player = new();
     private MediaPlayer incomingPlayer = new();
@@ -698,7 +744,7 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
-        QueueList.ItemsSource = queue; LibraryList.ItemsSource = filtered; LibraryListA.ItemsSource = filtered; LibraryListB.ItemsSource = filtered; HistoryList.ItemsSource = history;
+        QueueList.ItemsSource = queue; LibraryList.ItemsSource = filtered; LibraryListA.ItemsSource = filteredMusic; LibraryListB.ItemsSource = filteredJingles; ConfigureLibraryCategories(); HistoryList.ItemsSource = history;
         for (int i=0;i<9;i++) { var n=i; var b=new Button { Content=$"CART {i+1}", Background=new SolidColorBrush(Color.FromRgb((byte)(65+i*10),(byte)(37+i*6),(byte)(61+i*4))), Tag=i, FontSize=14, FontWeight=FontWeights.Bold, Foreground=Brushes.White, BorderBrush=new SolidColorBrush(Color.FromRgb(85,112,143)), BorderThickness=new Thickness(1), Margin=new Thickness(3), ToolTip="Αριστερό κλικ: PLAY · Δεξί κλικ: φόρτωση Cart" }; b.Click += (_,_)=> { if(Keyboard.Modifiers.HasFlag(ModifierKeys.Shift))StopSingleCart(n);else PlayCart(n); }; b.MouseRightButtonUp += (_,_)=>AssignCart(n); CartGrid.Children.Add(b); cartPlayers[n].MediaEnded += (_,_)=>Dispatcher.BeginInvoke(()=>UpdateCartPad(n,false)); }
         searchDebounce.Tick += (_,_) => { searchDebounce.Stop(); RefreshLibrary(); };
         saveDebounce.Tick += (_,_)=>{saveDebounce.Stop();if(fading){pendingStateSave=true;return;}FlushState();};
@@ -827,6 +873,8 @@ public partial class MainWindow : Window
             // One CollectionChanged.Reset notification instead of thousands of add events.
             var refreshWatch=Stopwatch.StartNew();
             filtered.ReplaceAll(matches);
+            filteredMusic.ReplaceAll(matches.Where(t=>GetMediaCategory(t.Path)=="MUSIC").ToArray());
+            filteredJingles.ReplaceAll(matches.Where(t=>GetMediaCategory(t.Path)=="JINGLES"||GetMediaCategory(t.Path)=="SPOTS").ToArray());
             if(refreshWatch.ElapsedMilliseconds>150)LogDiagnostic("LIBRARY",$"Refresh {matches.Length:N0} tracks: {refreshWatch.ElapsedMilliseconds} ms");
             if(selectedPath!=null){
                 var selected=matches.FirstOrDefault(t=>string.Equals(t.Path,selectedPath,StringComparison.OrdinalIgnoreCase));
