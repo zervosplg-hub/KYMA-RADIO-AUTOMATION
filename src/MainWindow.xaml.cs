@@ -342,31 +342,53 @@ public partial class MainWindow : Window
         w.Show();
     }
     private void AddProMainMenu(){
-        // Insert a compact navigation bar into the library header, without changing the playout layout.
-        var libraryGrid=System.Windows.Media.VisualTreeHelper.GetParent(LibraryList) as Grid;
+        // The Studio header follows the SOHO control-panel hierarchy.
+        // Only implemented workflows are clickable; no simulated/placeholder screens.
+        var libraryGrid=VisualTreeHelper.GetParent(LibraryList) as Grid;
         if(libraryGrid==null)return;
-        var outer=System.Windows.Media.VisualTreeHelper.GetParent(libraryGrid) as Grid;
+        var outer=VisualTreeHelper.GetParent(libraryGrid) as Grid;
         if(outer==null)return;
         var header=outer.Children.OfType<Border>().FirstOrDefault(x=>Grid.GetRow(x)==0);
         if(header==null)return;
-        var bar=new DockPanel { LastChildFill=true };
-        var heading=new TextBlock { Text="LIBRARY / PRO",FontWeight=FontWeights.Bold,FontSize=13,
-            VerticalAlignment=VerticalAlignment.Center,Margin=new Thickness(0,0,10,0) };
+        var bar=new DockPanel {LastChildFill=true};
+        var heading=new TextBlock {Text="STUDIO  /  CONTROL PANEL",FontWeight=FontWeights.Bold,
+            FontSize=13,VerticalAlignment=VerticalAlignment.Center,Margin=new Thickness(0,0,8,0)};
         DockPanel.SetDock(heading,Dock.Left);bar.Children.Add(heading);
-        var menu=new WrapPanel { HorizontalAlignment=HorizontalAlignment.Right };
-        void Nav(string label,Action action){
-            var button=new Button { Content=label,FontSize=10,Padding=new Thickness(7,4,7,4),
-                Margin=new Thickness(2,0,2,0) };
-            button.Click+=(_,_)=>action();menu.Children.Add(button);
+        var menu=new WrapPanel {HorizontalAlignment=HorizontalAlignment.Right};
+        MenuItem EnabledItem(string title,Action action){
+            var item=new MenuItem {Header=title};
+            item.Click+=(_,_)=>action();return item;
         }
-        Nav("MUSIC",()=>OpenMediaManager("MUSIC"));
-        Nav("JINGLES",()=>OpenMediaManager("JINGLES"));
-        Nav("SPOTS",()=>OpenMediaManager("SPOTS"));
-        Nav("COMMERCIALS",()=>OpenProDocumentManager("CAMPAIGNS","COMMERCIAL CAMPAIGNS",
-            "# client,spot,start_date,end_date,plays_per_day\n"));
-        Nav("SCHEDULER",OpenProScheduler);
-        Nav("FINAL LOG",()=>OpenProDocumentManager("FINAL_LOG_LAST","LAST SAVED FINAL LOG",
-            "# Generate and save a Final Log using SCHEDULER first.\n"));
+        MenuItem PendingItem(string title)=>new MenuItem {Header=title+"  (σε ανάπτυξη)",IsEnabled=false};
+        void Group(string title,params MenuItem[] items){
+            var button=new Button {Content=title+" ▾",FontSize=11,Padding=new Thickness(8,4,8,4),
+                Margin=new Thickness(2,0,2,0)};
+            var context=new ContextMenu {Background=new SolidColorBrush(Color.FromRgb(30,43,61)),
+                Foreground=Brushes.White};
+            foreach(var item in items)context.Items.Add(item);
+            button.Click+=(_,_)=>{context.PlacementTarget=button;context.IsOpen=true;};
+            menu.Children.Add(button);
+        }
+        Group("ΒΑΣΕΙΣ",
+            EnabledItem("Τραγούδια",()=>OpenMediaManager("MUSIC")),
+            EnabledItem("Spots / Διαφημίσεις (αρχεία)",()=>OpenMediaManager("SPOTS")),
+            EnabledItem("Jingles",()=>OpenMediaManager("JINGLES")),
+            PendingItem("Λοιπά assets"),PendingItem("Sweepers"),
+            PendingItem("Instant Jingles / Παλέτες"),PendingItem("Voice tracks"),
+            PendingItem("Κείμενα"));
+        Group("ΠΡΟΓΡΑΜΜΑΤΙΣΜΟΣ",
+            PendingItem("Playlists / Ημερολόγιο"),
+            EnabledItem("Αυτόματο πρόγραμμα (δοκιμαστικός offline scheduler)",OpenProScheduler),
+            PendingItem("Force clocks"),PendingItem("Αναμετάδοση"),
+            PendingItem("RDS"),
+            EnabledItem("Ημερήσια playlist (προβολή αποθηκευμένου log)",
+                ()=>OpenProDocumentManager("FINAL_LOG_LAST","LAST SAVED FINAL LOG",
+                    "# Generate and save a Final Log using SCHEDULER first.\\n")));
+        Group("ΡΥΘΜΙΣΕΙΣ",PendingItem("Γενικές ρυθμίσεις"),
+            PendingItem("Κάρτες ήχου και έξοδοι"),PendingItem("Χρήστες και ασφάλεια"),
+            PendingItem("Αντιστοιχίσεις διαδρομών"));
+        Group("ΒΟΗΘΗΜΑΤΑ",PendingItem("Ενημέρωση Internet"),
+            PendingItem("Streaming"),PendingItem("Έλεγχος ακεραιότητας"));
         DockPanel.SetDock(menu,Dock.Right);bar.Children.Add(menu);
         header.Child=bar;
     }
