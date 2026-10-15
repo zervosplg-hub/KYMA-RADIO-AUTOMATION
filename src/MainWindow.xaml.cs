@@ -235,9 +235,9 @@ public partial class MainWindow : Window
                         string p=System.IO.Path.Combine(proPath,name+".txt");
                         return File.Exists(p)?File.ReadAllText(p):fallback;
                     }
-                    var categoryLines=Read("CATEGORIES","GOLD\\nCURRENT\\nGREEK\\nINTERNATIONAL\\nJINGLES").Split('\n')
+                    var categoryLines=Read("CATEGORIES","GOLD\nCURRENT\nGREEK\nINTERNATIONAL\nJINGLES").Split('\n')
                         .Select(x=>x.Trim()).Where(x=>x.Length>0&&!x.StartsWith("#")).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
-                    var rules=Read("ROTATION","ARTIST_SEPARATION_MIN=90\\nTITLE_SEPARATION_MIN=240");
+                    var rules=Read("ROTATION","ARTIST_SEPARATION_MIN=90\nTITLE_SEPARATION_MIN=240");
                     int artistGap=90,titleGap=240;
                     foreach(var line in rules.Split('\n')){
                         var parts=line.Trim().Split('=',2);
@@ -246,15 +246,16 @@ public partial class MainWindow : Window
                         if(parts[0].Trim().Equals("TITLE_SEPARATION_MIN",StringComparison.OrdinalIgnoreCase))titleGap=Math.Clamp(minutes,0,1440);
                     }
                     // Category mapping is explicit: "CATEGORY|substring" per line, or ALL by default.
-                    var mapLines=Read("CATEGORY_MAP","# CATEGORY|filename substring\\n");
+                    var mapLines=Read("CATEGORY_MAP","# CATEGORY|filename substring\n");
                     var mappings=new List<(string category,string token)>();
                     foreach(var line in mapLines.Split('\n')){
                         var parts=line.Trim().Split('|',2);
                         if(parts.Length==2&&parts[0].Length>0&&parts[1].Length>0)
                             mappings.Add((parts[0].Trim(),parts[1].Trim()));
                     }
-                    var clockText=Read("CLOCKS","00:00 MUSIC\\n00:15 JINGLE\\n00:30 MUSIC\\n00:45 STATION ID");
+                    var clockText=Read("CLOCKS","00:00 MUSIC\n00:15 JINGLE\n00:30 MUSIC\n00:45 STATION ID");
                     var slots=new List<(int minute,string category)>();
+                    int duplicateClockSlots=0;
                     var invalidClockLines=new List<string>();
                     foreach(var line in clockText.Split('\n')){
                         var parts=line.Trim().Split(' ',2,StringSplitOptions.RemoveEmptyEntries);
@@ -264,14 +265,16 @@ public partial class MainWindow : Window
                         slots.Add(((int)slot.TotalMinutes,parts[1].Trim().ToUpperInvariant()));
                     }
                     if(slots.Count==0)slots.Add((0,"MUSIC"));
+                    duplicateClockSlots=slots.Count-slots.Select(x=>x.minute).Distinct().Count();
                     slots=slots.OrderBy(x=>x.minute).GroupBy(x=>x.minute).Select(g=>g.First()).ToList();
                     var candidates=new List<(string path,string artist,string category,double duration)>();
-                    int missing=0;
+                    int missing=0,unmapped=0;
                     foreach(string path in snapshot){
                         if(!File.Exists(path)){missing++;continue;}
                         string name=System.IO.Path.GetFileNameWithoutExtension(path);
                         string artist=name.Split(new[]{" - "," – "},StringSplitOptions.None)[0].Trim();
-                        string category=mappings.FirstOrDefault(m=>name.Contains(m.token,StringComparison.OrdinalIgnoreCase)).category??"MUSIC";
+                        string category=mappings.FirstOrDefault(m=>name.Contains(m.token,StringComparison.OrdinalIgnoreCase)||path.Contains(m.token,StringComparison.OrdinalIgnoreCase)).category??"MUSIC";
+                        if(category=="MUSIC"&&mappings.Count>0)unmapped++;
                         double duration=durations.TryGetValue(path,out var known)&&known>0?known:180;
                         candidates.Add((path,artist,category,Math.Clamp(duration,1,3600)));
                     }
@@ -289,7 +292,7 @@ public partial class MainWindow : Window
                             DateTime planned=hourStart.AddMinutes(slot.minute);
                             string desired=slot.category;
                             bool matches((string path,string artist,string category,double duration) c)=>
-                                desired=="MUSIC"||desired=="ALL"||
+                                (desired=="MUSIC" && !c.category.Equals("JINGLES",StringComparison.OrdinalIgnoreCase) && !c.category.Equals("SPOTS",StringComparison.OrdinalIgnoreCase))||desired=="ALL"||
                                 (desired=="JINGLE"&&c.category=="JINGLES")||
                                 string.Equals(c.category,desired,StringComparison.OrdinalIgnoreCase);
                             int selected=-1;
@@ -304,7 +307,10 @@ public partial class MainWindow : Window
                             }
                             if(selected<0 && (desired=="MUSIC"||desired=="ALL") && candidates.Count>0){
                                 // Emergency selection: relax artist/title separation to keep the plan populated.
-                                selected=cursor%candidates.Count;fallbackCount++;
+                                for(int offset=0;offset<candidates.Count;offset++){
+                                    int idx=(cursor+offset)%candidates.Count;
+                                    if(matches(candidates[idx])){selected=idx;fallbackCount++;break;}
+                                }
                             }
                             if(selected<0){violations++;sb.AppendLine(planned.ToString("HH:mm")+"  UNFILLED "+desired+" (rotation/category)");continue;}
                             var chosen=candidates[selected];cursor=(selected+1)%candidates.Count;
@@ -313,16 +319,18 @@ public partial class MainWindow : Window
                             entries.Add((planned,chosen.path,desired,chosen.duration));
                             sb.AppendLine(planned.ToString("HH:mm")+"  "+desired.PadRight(12)+
                                 " "+System.IO.Path.GetFileNameWithoutExtension(chosen.path)+
-                                " ["+TimeSpan.FromSeconds(chosen.duration).ToString(@"mm\\:ss")+"]");
+                                " ["+TimeSpan.FromSeconds(chosen.duration).ToString(@"mm\:ss")+"]");
                         }
                     }
                     sb.AppendLine("--------------------------------------------------------------");
                     sb.AppendLine($"Scheduled={entries.Count} · Unfilled={violations} · Missing files={missing} · Library={snapshot.Length}");
-                    sb.AppendLine($"Rotation fallbacks={fallbackCount} · Estimated durations={estimatedCount} · Invalid clock lines={invalidClockLines.Count}");
+                    sb.AppendLine($"Rotation fallbacks={fallbackCount} · Estimated durations={estimatedCount} · Invalid clock lines={invalidClockLines.Count} · Duplicate clock slots={duplicateClockSlots}");
+                    sb.AppendLine($"Unmapped library tracks={unmapped} · Mapped categories={mappings.Count}");
+                    if(mappings.Count==0)sb.AppendLine("WARNING: CATEGORY_MAP is empty. JINGLE/STATION ID slots cannot resolve automatically.");
                     foreach(var invalid in invalidClockLines.Take(20))sb.AppendLine("INVALID CLOCK: "+invalid);
                     if(categoryLines.Length==0)sb.AppendLine("WARNING: No configured categories.");
                     sb.AppendLine("WARNING: slot-based plan; not a gapless broadcast-ready schedule.");
-                    var csvBuilder=new StringBuilder("PlannedTime,Category,DurationSeconds,Path\\r\\n");
+                    var csvBuilder=new StringBuilder("PlannedTime,Category,DurationSeconds,Path\r\n");
                     string Quote(string x)=>"\""+x.Replace("\"","\"\"")+"\"";
                     foreach(var e in entries)csvBuilder.AppendLine(
                         Quote(e.time.ToString("yyyy-MM-dd HH:mm:ss"))+","+
@@ -412,13 +420,13 @@ public partial class MainWindow : Window
         }
         // 1: persisted hourly clock template editor
         Add("1 · CLOCKS",()=>OpenDocument("CLOCKS",
-            "# Ωριαίο Clock (πρότυπο, όχι ενεργό scheduler)\\n00:00 MUSIC\\n00:15 JINGLE\\n00:30 MUSIC\\n00:45 STATION ID\\n"));
+            "# Ωριαίο Clock (πρότυπο, όχι ενεργό scheduler)\\n00:00 MUSIC\n00:15 JINGLE\n00:30 MUSIC\n00:45 STATION ID\\n"));
         // 2: persisted rotation and separation rules
         Add("2 · ROTATION",()=>OpenDocument("ROTATION",
-            "# Μουσικοί κανόνες (πρότυπο)\\nARTIST_SEPARATION_MIN=90\\nTITLE_SEPARATION_MIN=240\\n"));
+            "# Μουσικοί κανόνες (πρότυπο)\\nARTIST_SEPARATION_MIN=90\nTITLE_SEPARATION_MIN=240\\n"));
         // 3: category definitions
         Add("3 · CATEGORIES",()=>OpenDocument("CATEGORIES",
-            "# Κατηγορίες\\nGOLD\\nCURRENT\\nGREEK\\nINTERNATIONAL\\nJINGLES\\n"));
+            "# Κατηγορίες\\nGOLD\nCURRENT\nGREEK\nINTERNATIONAL\nJINGLES\\n"));
         Add("CATEGORY MAP",()=>OpenDocument("CATEGORY_MAP",
             "# CATEGORY|filename substring (π.χ. JINGLES|Station ID)\\n"));
         // 4: commercial clients
