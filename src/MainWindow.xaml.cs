@@ -206,9 +206,10 @@ public partial class MainWindow : Window
         var generate=new Button { Content="GENERATE FINAL LOG",Padding=new Thickness(12,8,12,8) };
         var export=new Button { Content="EXPORT CSV",Padding=new Thickness(12,8,12,8) };
         var apply=new Button { Content="APPEND TO PLAYLIST",Padding=new Thickness(12,8,12,8) };
+        var saveLog=new Button { Content="SAVE FINAL LOG",Padding=new Thickness(12,8,12,8) };
         controls.Children.Add(startLabel);controls.Children.Add(startHour);
         controls.Children.Add(hoursLabel);controls.Children.Add(countHours);
-        controls.Children.Add(generate);controls.Children.Add(export);controls.Children.Add(apply);
+        controls.Children.Add(generate);controls.Children.Add(export);controls.Children.Add(saveLog);controls.Children.Add(apply);
         DockPanel.SetDock(controls,Dock.Top);root.Children.Add(controls);
         var output=new TextBox { IsReadOnly=true,AcceptsReturn=true,
             FontFamily=new FontFamily("Consolas"),FontSize=12,
@@ -217,10 +218,11 @@ public partial class MainWindow : Window
         root.Children.Add(output);w.Content=root;
         var generated=new List<(DateTime time,string path,string category,double duration)>();
         string csv="";
+        string logText="";
         generate.Click+=async (_,_)=>{
             generate.IsEnabled=false;apply.IsEnabled=false;
             output.Text="Δημιουργία προγράμματος...";
-            generated.Clear();csv="";
+            generated.Clear();csv="";logText="";
             var snapshot=library.Select(t=>t.Path).ToArray();
             var durations=new Dictionary<string,double>(decodedDurations,StringComparer.OrdinalIgnoreCase);
             int hour=startHour.SelectedIndex;
@@ -253,14 +255,16 @@ public partial class MainWindow : Window
                     }
                     var clockText=Read("CLOCKS","00:00 MUSIC\\n00:15 JINGLE\\n00:30 MUSIC\\n00:45 STATION ID");
                     var slots=new List<(int minute,string category)>();
+                    var invalidClockLines=new List<string>();
                     foreach(var line in clockText.Split('\n')){
                         var parts=line.Trim().Split(' ',2,StringSplitOptions.RemoveEmptyEntries);
-                        if(parts.Length!=2||!TimeSpan.TryParse(parts[0],out var slot))continue;
-                        if(slot.TotalMinutes>=60||slot.TotalMinutes<0)continue;
+                        if(parts.Length==0||parts[0].StartsWith("#"))continue;
+                        if(parts.Length!=2||!TimeSpan.TryParse(parts[0],out var slot)){invalidClockLines.Add(line.Trim());continue;}
+                        if(slot.TotalMinutes>=60||slot.TotalMinutes<0){invalidClockLines.Add(line.Trim());continue;}
                         slots.Add(((int)slot.TotalMinutes,parts[1].Trim().ToUpperInvariant()));
                     }
                     if(slots.Count==0)slots.Add((0,"MUSIC"));
-                    slots=slots.OrderBy(x=>x.minute).ToList();
+                    slots=slots.OrderBy(x=>x.minute).GroupBy(x=>x.minute).Select(g=>g.First()).ToList();
                     var candidates=new List<(string path,string artist,string category,double duration)>();
                     int missing=0;
                     foreach(string path in snapshot){
@@ -278,6 +282,7 @@ public partial class MainWindow : Window
                     sb.AppendLine("KYMA PRO FINAL LOG | "+beginning.ToString("dd/MM/yyyy HH:mm")+" | "+number+"h");
                     sb.AppendLine("--------------------------------------------------------------");
                     int cursor=0,violations=0;
+                    int fallbackCount=0,estimatedCount=0;
                     for(int h=0;h<number;h++){
                         var hourStart=beginning.AddHours(h);
                         foreach(var slot in slots){
@@ -288,6 +293,7 @@ public partial class MainWindow : Window
                                 (desired=="JINGLE"&&c.category=="JINGLES")||
                                 string.Equals(c.category,desired,StringComparison.OrdinalIgnoreCase);
                             int selected=-1;
+                            // A fallback to the MUSIC pool is allowed only for general MUSIC/ALL slots.
                             for(int attempt=0;attempt<candidates.Count;attempt++){
                                 int index=(cursor+attempt)%candidates.Count;
                                 var c=candidates[index];
@@ -296,8 +302,13 @@ public partial class MainWindow : Window
                                 if(lastArtist.TryGetValue(c.artist,out var lastA)&&(planned-lastA).TotalMinutes<artistGap)continue;
                                 selected=index;break;
                             }
+                            if(selected<0 && (desired=="MUSIC"||desired=="ALL") && candidates.Count>0){
+                                // Emergency selection: relax artist/title separation to keep the plan populated.
+                                selected=cursor%candidates.Count;fallbackCount++;
+                            }
                             if(selected<0){violations++;sb.AppendLine(planned.ToString("HH:mm")+"  UNFILLED "+desired+" (rotation/category)");continue;}
                             var chosen=candidates[selected];cursor=(selected+1)%candidates.Count;
+                            if(!durations.ContainsKey(chosen.path))estimatedCount++;
                             lastTitle[chosen.path]=planned;lastArtist[chosen.artist]=planned;
                             entries.Add((planned,chosen.path,desired,chosen.duration));
                             sb.AppendLine(planned.ToString("HH:mm")+"  "+desired.PadRight(12)+
@@ -307,6 +318,9 @@ public partial class MainWindow : Window
                     }
                     sb.AppendLine("--------------------------------------------------------------");
                     sb.AppendLine($"Scheduled={entries.Count} · Unfilled={violations} · Missing files={missing} · Library={snapshot.Length}");
+                    sb.AppendLine($"Rotation fallbacks={fallbackCount} · Estimated durations={estimatedCount} · Invalid clock lines={invalidClockLines.Count}");
+                    foreach(var invalid in invalidClockLines.Take(20))sb.AppendLine("INVALID CLOCK: "+invalid);
+                    if(categoryLines.Length==0)sb.AppendLine("WARNING: No configured categories.");
                     sb.AppendLine("WARNING: slot-based plan; not a gapless broadcast-ready schedule.");
                     var csvBuilder=new StringBuilder("PlannedTime,Category,DurationSeconds,Path\\r\\n");
                     string Quote(string x)=>"\""+x.Replace("\"","\"\"")+"\"";
@@ -316,11 +330,21 @@ public partial class MainWindow : Window
                         Quote(e.path));
                     return (entries,sb.ToString(),csvBuilder.ToString());
                 });
-                generated=result.entries;output.Text=result.Item2;csv=result.Item3;
+                generated=result.entries;output.Text=result.Item2;logText=result.Item2;csv=result.Item3;
                 apply.IsEnabled=generated.Count>0;
                 LogDiagnostic("SCHEDULER",$"Generated {generated.Count} slots; {number} hours; no on-air changes");
             }catch(Exception ex){output.Text="Scheduler error: "+ex.Message;LogDiagnostic("ERROR","PRO scheduler: "+ex);}
             finally{generate.IsEnabled=true;}
+        };
+        saveLog.Click+=(_,_)=>{
+            if(logText.Length==0)return;
+            try{
+                Directory.CreateDirectory(proDataDirectory);
+                string file=System.IO.Path.Combine(proDataDirectory,"FINAL_LOG_LAST.txt");
+                File.WriteAllText(file,logText,Encoding.UTF8);
+                LogDiagnostic("SCHEDULER","Final log saved: "+file);
+                MessageBox.Show("Το Final Log αποθηκεύτηκε στον φάκελο PRO.","KYMA PRO");
+            }catch(Exception ex){LogDiagnostic("ERROR","Final log save: "+ex);MessageBox.Show(ex.Message,"KYMA PRO");}
         };
         export.Click+=(_,_)=>{
             if(csv.Length==0)return;
@@ -446,12 +470,18 @@ public partial class MainWindow : Window
                 (string.IsNullOrEmpty(currentDocument)?"KYMA_PRO_REPORT":currentDocument)+".txt" };
             if(dialog.ShowDialog()==true)File.WriteAllText(dialog.FileName,editor.Text,Encoding.UTF8);
         });
+        Add("LAST FINAL LOG",()=>OpenDocument("FINAL_LOG_LAST",
+            "# Δεν έχει αποθηκευτεί Final Log ακόμη.\\n"));
         Add("BACKUP PRO",()=>{
             var dialog=new SaveFileDialog { Filter="ZIP archive|*.zip",FileName="KYMA_PRO_BACKUP_"+DateTime.Now.ToString("yyyyMMdd_HHmm")+".zip" };
             if(dialog.ShowDialog()!=true)return;
             if(File.Exists(dialog.FileName))File.Delete(dialog.FileName);
             System.IO.Compression.ZipFile.CreateFromDirectory(proDataDirectory,dialog.FileName);
             LogDiagnostic("PRO","PRO documents backup created");
+        });
+        Add("OPEN PRO FOLDER",()=>{
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo {
+                FileName=proDataDirectory,UseShellExecute=true });
         });
         Add("RESTORE PRO",()=>{
             var dialog=new OpenFileDialog { Filter="ZIP archive|*.zip" };
