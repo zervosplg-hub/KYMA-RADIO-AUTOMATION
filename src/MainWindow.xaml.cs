@@ -60,6 +60,27 @@ public partial class MainWindow : Window
     private DateTime lastHeartbeat = DateTime.UtcNow;
     private Window? diagnosticsWindow;
     private TextBox? diagnosticsText;
+    private int completedCrossfades=0;
+    private DateTime crossfadeStartedUtc=DateTime.MinValue;
+    private string crossfadeFrom="";
+    private string crossfadeTo="";
+    private long crossfadeStartRamMb=0;
+    private long baselineMemoryMb=0;
+    private long peakMemoryMb=0;
+    private long lastMemoryMb=0;
+    private int stableMemorySamples=0;
+    private long MemoryMb(){
+        diagnosticsProcess.Refresh();
+        return diagnosticsProcess.WorkingSet64/1048576;
+    }
+    private void RecordMemorySample(){
+        long mb=MemoryMb();
+        if(baselineMemoryMb==0)baselineMemoryMb=mb;
+        peakMemoryMb=Math.Max(peakMemoryMb,mb);
+        if(lastMemoryMb>0 && Math.Abs(mb-lastMemoryMb)<=8)stableMemorySamples++;
+        else stableMemorySamples=0;
+        lastMemoryMb=mb;
+    }
     private int consecutiveAudioFailures=0;
     private string? lastStandbyFailedPath;
     private int standbyRetryCount=0;
@@ -90,6 +111,10 @@ public partial class MainWindow : Window
                 Background=new SolidColorBrush(Color.FromRgb(40,69,94)),Foreground=Brushes.White };
             button.Click+=(_,_)=>action();bar.Children.Add(button);return button;
         }
+        Action("MEMORY SUMMARY",()=>{
+            RecordMemorySample();
+            LogDiagnostic("MEMORY",$"Current={lastMemoryMb} MB · baseline={baselineMemoryMb} MB · peak={peakMemoryMb} MB · delta={lastMemoryMb-baselineMemoryMb:+#;-#;0} MB · completed crossfades={completedCrossfades} · stable samples={stableMemorySamples}");
+        });
         Action("CANCEL CLEAN / IMPORT",CancelBackgroundJobs);
         Action("OPEN ERROR LOG",()=>{
             if(File.Exists(errorLogPath))Process.Start(new ProcessStartInfo(errorLogPath){UseShellExecute=true});
@@ -195,7 +220,7 @@ public partial class MainWindow : Window
             ContextMenu.Items.Add(debugMenu);
         }
         LogDiagnostic("STARTUP","UI initialized");
-        Title="KYMA RADIO AUTOMATION | SOHO Professional 3.0 BETA";
+        Title="KYMA RADIO AUTOMATION | SOHO Professional 3.1 BETA";
         EnableVirtualizedLists();
         Loaded += (_,_)=>{UpdateVersionLabels(this);LogDiagnostic("STARTUP",$"Window loaded in {startupClock.ElapsedMilliseconds} ms; library={library.Count:N0}; queue={queue.Count:N0}");};
         Dispatcher.UnhandledException+=(_,e)=>{LogDiagnostic("ERROR","Unhandled UI exception: "+e.Exception);};
@@ -256,7 +281,10 @@ public partial class MainWindow : Window
                 var cpu=diagnosticsProcess.TotalProcessorTime;
                 var elapsed=(now-lastCpuSample).TotalSeconds;
                 var cpuPct=elapsed>0?100*(cpu-lastCpuTime).TotalSeconds/(elapsed*Environment.ProcessorCount):0;
-                LogDiagnostic("PERF",$"CPU {cpuPct:F1}% · RAM {diagnosticsProcess.WorkingSet64/1048576:N0} MB · UI lag {Math.Max(0,gap-1000):F0} ms · audio={(stopped?"STOPPED":"ACTIVE")}");
+                RecordMemorySample();
+                LogDiagnostic("PERF",$"CPU {cpuPct:F1}% · RAM {lastMemoryMb:N0} MB · peak {peakMemoryMb:N0} MB · UI lag {Math.Max(0,gap-1000):F0} ms · audio={(stopped?"STOPPED":"ACTIVE")} · fades={completedCrossfades}");
+                if(completedCrossfades>0 && completedCrossfades%5==0 && stableMemorySamples==1)
+                    LogDiagnostic("MEMORY",$"After {completedCrossfades} fades: RAM={lastMemoryMb} MB, baseline={baselineMemoryMb} MB, peak={peakMemoryMb} MB");
                 lastCpuTime=cpu;lastCpuSample=now;lastPerformanceLog=now;
             }
             lastHeartbeat=now;
@@ -269,7 +297,7 @@ public partial class MainWindow : Window
         for(int i=0;i<VisualTreeHelper.GetChildrenCount(root);i++){
             var child=VisualTreeHelper.GetChild(root,i);
             if(child is TextBlock label && label.Text.Contains("BROADCAST CONSOLE v2.2.1 BETA"))
-                label.Text=label.Text.Replace("v2.2.1 BETA","v3.0 BETA");
+                label.Text=label.Text.Replace("v2.2.1 BETA","v3.1 BETA");
             UpdateVersionLabels(child);
         }
     }
@@ -449,6 +477,11 @@ public partial class MainWindow : Window
             fadeStartPosition=player.Position.TotalSeconds;
             outgoingFadeDuration=Math.Max(0.1,outgoingFadeEnd-fadeStartPosition);
             fadeElapsedSeconds=0;lastFadeClock=DateTime.UtcNow;
+            crossfadeStartedUtc=DateTime.UtcNow;
+            crossfadeFrom=activeIndex>=0&&activeIndex<queue.Count?queue[activeIndex].Display:"(unknown)";
+            crossfadeTo=queue[next].Display;
+            crossfadeStartRamMb=MemoryMb();
+            LogDiagnostic("CROSSFADE",$"START {crossfadeFrom} -> {crossfadeTo} · out={fadeStartPosition:F2}s · target={outgoingFadeDuration:F2}s · RAM={crossfadeStartRamMb} MB");
             fading=true;
             activeIndex=next;NowTitle.Text=queue[next].Display;NowSub.Text=queue[next].Path;
             QueueList.SelectedIndex=next;history.Insert(0,$"{DateTime.Now:HH:mm:ss}   {queue[next].Display}");
@@ -463,6 +496,10 @@ public partial class MainWindow : Window
     }
     private void FinishCrossfade() {
         if(!fading)return;
+        completedCrossfades++;
+        long finishRamMb=MemoryMb();
+        double actualSeconds=crossfadeStartedUtc==DateTime.MinValue?0:(DateTime.UtcNow-crossfadeStartedUtc).TotalSeconds;
+        LogDiagnostic("CROSSFADE",$"END #{completedCrossfades} {crossfadeFrom} -> {crossfadeTo} · actual={actualSeconds:F2}s · target={outgoingFadeDuration:F2}s · RAM={finishRamMb} MB · delta={finishRamMb-crossfadeStartRamMb:+#;-#;0} MB");
         var outgoing=player;player=incomingPlayer;incomingPlayer=outgoing;
         incomingPlayer.Stop();incomingPlayer.Close();incomingPlayer.Volume=playbackVolume;
         player.Volume=playbackVolume;fading=false;fadeElapsedSeconds=0;preloadedPath=null;preloadReady=false;PlaybackProgress.Value=0;if(player.NaturalDuration.HasTimeSpan)PlaybackProgress.Maximum=Math.Max(1,player.NaturalDuration.TimeSpan.TotalSeconds);
