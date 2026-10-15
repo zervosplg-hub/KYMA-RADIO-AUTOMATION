@@ -116,6 +116,9 @@ public partial class MainWindow : Window
             if(next>=0)DiagnoseSlowNasFile(queue[next].Path,0);
             else LogDiagnostic("NAS","No upcoming track to test");
         });
+        Action("PRELOAD STATS",()=>{
+            LogDiagnostic("PRELOAD STATS",$"Ready={preloadReadyCount} · average={(preloadReadyCount>0?preloadTotalMs/preloadReadyCount:0):F0}ms · max={preloadMaxMs:F0}ms · warnings={preloadWaitWarnings} · missing checks={skippedMissingFiles}");
+        });
         Action("AUDIO HEALTH",()=>{
             LogDiagnostic("AUDIO HEALTH",$"Crossfades={completedCrossfades} · slow opens >3s={slowOpenTotal} · preload warnings={preloadWaitWarnings} · ready={preloadReady} · fading={fading} · RAM={MemoryMb()} MB");
             foreach(var item in slowOpenCounts.OrderByDescending(x=>x.Value).Take(5))
@@ -205,6 +208,11 @@ public partial class MainWindow : Window
         }catch(Exception ex){LogDiagnostic("NAS",$"PROBE #{probeId} failed: {ex.GetType().Name}: {ex.Message}");}
     }
     private int preloadWaitWarnings=0;
+    private int preloadReadyCount=0;
+    private double preloadTotalMs=0;
+    private double preloadMaxMs=0;
+    private int skippedMissingFiles=0;
+    private DateTime lastMissingLogUtc=DateTime.MinValue;
     private bool shortTrackWarningIssued=false;
     private void CheckPreloadHealth(){
         if(stopped||paused||!auto||fading)return;
@@ -215,7 +223,9 @@ public partial class MainWindow : Window
         if(remaining<=0)return;
         bool pending=string.Equals(preloadedPath,path,StringComparison.OrdinalIgnoreCase);
         if(pending&&preloadReady){preloadWarningPath=null;return;}
+        // Very short jingles cannot preload until the previous fade completes.
         if(remaining<=Math.Max(12,crossfadeSeconds+8) &&
+           !(CurrentDurationSeconds()<5 && pending && (DateTime.UtcNow-preloadStartedAt).TotalSeconds<2) &&
            (preloadWarningPath!=path||(DateTime.UtcNow-lastPreloadWarningUtc).TotalSeconds>=15)){
             preloadWarningPath=path;lastPreloadWarningUtc=DateTime.UtcNow;preloadWaitWarnings++;
             LogDiagnostic("PRELOAD",$"WARNING #{preloadWaitWarnings}: NEXT not ready · {System.IO.Path.GetFileName(path)} · remaining={remaining:F1}s · pending={pending}");
@@ -285,7 +295,7 @@ public partial class MainWindow : Window
             ContextMenu.Items.Add(debugMenu);
         }
         LogDiagnostic("STARTUP","UI initialized");
-        Title="KYMA RADIO AUTOMATION | SOHO Professional 3.3 BETA";
+        Title="KYMA RADIO AUTOMATION | SOHO Professional 3.4 BETA";
         EnableVirtualizedLists();
         Loaded += (_,_)=>{UpdateVersionLabels(this);LogDiagnostic("STARTUP",$"Window loaded in {startupClock.ElapsedMilliseconds} ms; library={library.Count:N0}; queue={queue.Count:N0}");};
         Dispatcher.UnhandledException+=(_,e)=>{LogDiagnostic("ERROR","Unhandled UI exception: "+e.Exception);};
@@ -363,7 +373,7 @@ public partial class MainWindow : Window
         for(int i=0;i<VisualTreeHelper.GetChildrenCount(root);i++){
             var child=VisualTreeHelper.GetChild(root,i);
             if(child is TextBlock label && label.Text.Contains("BROADCAST CONSOLE v2.2.1 BETA"))
-                label.Text=label.Text.Replace("v2.2.1 BETA","v3.3 BETA");
+                label.Text=label.Text.Replace("v2.2.1 BETA","v3.4 BETA");
             UpdateVersionLabels(child);
         }
     }
@@ -509,7 +519,9 @@ public partial class MainWindow : Window
             }
             if(ReferenceEquals(sender,incomingPlayer)&&preloadedPath!=null){
                 preloadReady=true;preloadWarningPath=null;
-                LogDiagnostic("PRELOAD",$"READY {System.IO.Path.GetFileName(preloadedPath)} · elapsed={(DateTime.UtcNow-preloadStartedAt).TotalMilliseconds:F0} ms");
+                double readyMs=(DateTime.UtcNow-preloadStartedAt).TotalMilliseconds;
+                preloadReadyCount++;preloadTotalMs+=readyMs;preloadMaxMs=Math.Max(preloadMaxMs,readyMs);
+                LogDiagnostic("PRELOAD",$"READY {System.IO.Path.GetFileName(preloadedPath)} · elapsed={readyMs:F0} ms");
             }
         });
     }
@@ -521,8 +533,21 @@ public partial class MainWindow : Window
     }
     private int FindUpcomingIndex() {
         int next=activeIndex+1;
-        while(next<queue.Count&&!File.Exists(queue[next].Path))next++;
-        if(next>=queue.Count&&repeatPlaylist){next=0;while(next<queue.Count&&!File.Exists(queue[next].Path))next++;}
+        while(next<queue.Count&&!File.Exists(queue[next].Path)){
+            skippedMissingFiles++;
+            if((DateTime.UtcNow-lastMissingLogUtc).TotalSeconds>=30){
+                lastMissingLogUtc=DateTime.UtcNow;
+                LogDiagnostic("QUEUE",$"Skipping missing file: {System.IO.Path.GetFileName(queue[next].Path)} · total skipped checks={skippedMissingFiles}");
+            }
+            next++;
+        }
+        if(next>=queue.Count&&repeatPlaylist){
+            next=0;
+            while(next<queue.Count&&!File.Exists(queue[next].Path)){
+                skippedMissingFiles++;
+                next++;
+            }
+        }
         return next<queue.Count&&next!=activeIndex?next:-1;
     }
     private void PreloadUpcoming() {
