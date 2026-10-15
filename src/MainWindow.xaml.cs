@@ -111,6 +111,11 @@ public partial class MainWindow : Window
                 Background=new SolidColorBrush(Color.FromRgb(40,69,94)),Foreground=Brushes.White };
             button.Click+=(_,_)=>action();bar.Children.Add(button);return button;
         }
+        Action("TEST NAS NEXT",()=>{
+            int next=FindUpcomingIndex();
+            if(next>=0)DiagnoseSlowNasFile(queue[next].Path,0);
+            else LogDiagnostic("NAS","No upcoming track to test");
+        });
         Action("AUDIO HEALTH",()=>{
             LogDiagnostic("AUDIO HEALTH",$"Crossfades={completedCrossfades} · slow opens >3s={slowOpenTotal} · preload warnings={preloadWaitWarnings} · ready={preloadReady} · fading={fading} · RAM={MemoryMb()} MB");
             foreach(var item in slowOpenCounts.OrderByDescending(x=>x.Value).Take(5))
@@ -166,6 +171,39 @@ public partial class MainWindow : Window
     private DateTime lastPreloadWarningUtc=DateTime.MinValue;
     private readonly Dictionary<string,int> slowOpenCounts=new(StringComparer.OrdinalIgnoreCase);
     private int slowOpenTotal=0;
+    private int nasProbeCount=0;
+    private async void DiagnoseSlowNasFile(string path,double mediaOpenMs){
+        nasProbeCount++;
+        int probeId=nasProbeCount;
+        LogDiagnostic("NAS",$"PROBE #{probeId} started for {System.IO.Path.GetFileName(path)} · MediaOpened={mediaOpenMs:F0}ms");
+        try {
+            var result=await Task.Run(()=>{
+                var sw=Stopwatch.StartNew();
+                var info=new FileInfo(path);
+                long length=info.Length;
+                double metadataMs=sw.Elapsed.TotalMilliseconds;
+                sw.Restart();
+                byte[] buffer=new byte[65536];
+                int bytes;
+                using(var stream=new FileStream(path,FileMode.Open,FileAccess.Read,FileShare.ReadWrite,
+                    65536,FileOptions.SequentialScan))
+                    bytes=stream.Read(buffer,0,buffer.Length);
+                double firstReadMs=sw.Elapsed.TotalMilliseconds;
+                string extension=System.IO.Path.GetExtension(path).ToLowerInvariant();
+                string signature=bytes>=4?Convert.ToHexString(buffer,0,Math.Min(bytes,12)):"empty";
+                bool id3=bytes>=3&&buffer[0]==73&&buffer[1]==68&&buffer[2]==51;
+                long id3Size=0;
+                if(id3&&bytes>=10)
+                    id3Size=10L+((long)(buffer[6]&127)<<21)+((long)(buffer[7]&127)<<14)+((long)(buffer[8]&127)<<7)+(buffer[9]&127);
+                return (length,metadataMs,firstReadMs,bytes,extension,signature,id3Size);
+            });
+            LogDiagnostic("NAS",$"PROBE #{probeId} {System.IO.Path.GetFileName(path)} · size={result.length/1048576.0:F2} MiB · metadata={result.metadataMs:F0}ms · read64K={result.firstReadMs:F0}ms · bytes={result.bytes} · type={result.extension} · ID3v2={result.id3Size}B · header={result.signature} · MediaOpened={mediaOpenMs:F0}ms");
+            if(result.metadataMs>500||result.firstReadMs>500)
+                LogDiagnostic("NAS",$"PROBE #{probeId}: slow file access detected; investigate SMB/NAS");
+            else
+                LogDiagnostic("NAS",$"PROBE #{probeId}: file access fast at probe time; media decoder or earlier transient SMB delay remains possible");
+        }catch(Exception ex){LogDiagnostic("NAS",$"PROBE #{probeId} failed: {ex.GetType().Name}: {ex.Message}");}
+    }
     private int preloadWaitWarnings=0;
     private bool shortTrackWarningIssued=false;
     private void CheckPreloadHealth(){
@@ -247,7 +285,7 @@ public partial class MainWindow : Window
             ContextMenu.Items.Add(debugMenu);
         }
         LogDiagnostic("STARTUP","UI initialized");
-        Title="KYMA RADIO AUTOMATION | SOHO Professional 3.2 BETA";
+        Title="KYMA RADIO AUTOMATION | SOHO Professional 3.3 BETA";
         EnableVirtualizedLists();
         Loaded += (_,_)=>{UpdateVersionLabels(this);LogDiagnostic("STARTUP",$"Window loaded in {startupClock.ElapsedMilliseconds} ms; library={library.Count:N0}; queue={queue.Count:N0}");};
         Dispatcher.UnhandledException+=(_,e)=>{LogDiagnostic("ERROR","Unhandled UI exception: "+e.Exception);};
@@ -325,7 +363,7 @@ public partial class MainWindow : Window
         for(int i=0;i<VisualTreeHelper.GetChildrenCount(root);i++){
             var child=VisualTreeHelper.GetChild(root,i);
             if(child is TextBlock label && label.Text.Contains("BROADCAST CONSOLE v2.2.1 BETA"))
-                label.Text=label.Text.Replace("v2.2.1 BETA","v3.2 BETA");
+                label.Text=label.Text.Replace("v2.2.1 BETA","v3.3 BETA");
             UpdateVersionLabels(child);
         }
     }
@@ -458,6 +496,7 @@ public partial class MainWindow : Window
                 slowOpenTotal++;
                 slowOpenCounts[request.path]=slowOpenCounts.TryGetValue(request.path,out var n)?n+1:1;
                 LogDiagnostic("PRELOAD",$"SLOW OPEN: {role} · {System.IO.Path.GetFileName(request.path)} · {elapsed:F0} ms");
+                DiagnoseSlowNasFile(request.path,elapsed);
             }
         }
         else LogDiagnostic("AUDIO",$"{role} MediaOpened (no pending request)");
