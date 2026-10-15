@@ -111,6 +111,11 @@ public partial class MainWindow : Window
                 Background=new SolidColorBrush(Color.FromRgb(40,69,94)),Foreground=Brushes.White };
             button.Click+=(_,_)=>action();bar.Children.Add(button);return button;
         }
+        Action("AUDIO HEALTH",()=>{
+            LogDiagnostic("AUDIO HEALTH",$"Crossfades={completedCrossfades} · slow opens >3s={slowOpenTotal} · preload warnings={preloadWaitWarnings} · ready={preloadReady} · fading={fading} · RAM={MemoryMb()} MB");
+            foreach(var item in slowOpenCounts.OrderByDescending(x=>x.Value).Take(5))
+                LogDiagnostic("AUDIO HEALTH",$"Slow {item.Value}x: {System.IO.Path.GetFileName(item.Key)}");
+        });
         Action("MEMORY SUMMARY",()=>{
             RecordMemorySample();
             LogDiagnostic("MEMORY",$"Current={lastMemoryMb} MB · baseline={baselineMemoryMb} MB · peak={peakMemoryMb} MB · delta={lastMemoryMb-baselineMemoryMb:+#;-#;0} MB · completed crossfades={completedCrossfades} · stable samples={stableMemorySamples}");
@@ -157,6 +162,28 @@ public partial class MainWindow : Window
     private string? preloadedPath;
     private bool preloadReady;
     private DateTime preloadStartedAt = DateTime.MinValue;
+    private string? preloadWarningPath;
+    private DateTime lastPreloadWarningUtc=DateTime.MinValue;
+    private readonly Dictionary<string,int> slowOpenCounts=new(StringComparer.OrdinalIgnoreCase);
+    private int slowOpenTotal=0;
+    private int preloadWaitWarnings=0;
+    private bool shortTrackWarningIssued=false;
+    private void CheckPreloadHealth(){
+        if(stopped||paused||!auto||fading)return;
+        int upcoming=FindUpcomingIndex();
+        if(upcoming<0)return;
+        string path=queue[upcoming].Path;
+        double remaining=EffectiveEndSeconds()-player.Position.TotalSeconds;
+        if(remaining<=0)return;
+        bool pending=string.Equals(preloadedPath,path,StringComparison.OrdinalIgnoreCase);
+        if(pending&&preloadReady){preloadWarningPath=null;return;}
+        if(remaining<=Math.Max(12,crossfadeSeconds+8) &&
+           (preloadWarningPath!=path||(DateTime.UtcNow-lastPreloadWarningUtc).TotalSeconds>=15)){
+            preloadWarningPath=path;lastPreloadWarningUtc=DateTime.UtcNow;preloadWaitWarnings++;
+            LogDiagnostic("PRELOAD",$"WARNING #{preloadWaitWarnings}: NEXT not ready · {System.IO.Path.GetFileName(path)} · remaining={remaining:F1}s · pending={pending}");
+            StatusText.Text="NEXT AUDIO NOT READY";
+        }
+    }
     private readonly System.Threading.SemaphoreSlim waveformWorker = new(1,1);
     private int analysisGeneration = 0;
     private double silenceThresholdDb = -42;
@@ -220,7 +247,7 @@ public partial class MainWindow : Window
             ContextMenu.Items.Add(debugMenu);
         }
         LogDiagnostic("STARTUP","UI initialized");
-        Title="KYMA RADIO AUTOMATION | SOHO Professional 3.1 BETA";
+        Title="KYMA RADIO AUTOMATION | SOHO Professional 3.2 BETA";
         EnableVirtualizedLists();
         Loaded += (_,_)=>{UpdateVersionLabels(this);LogDiagnostic("STARTUP",$"Window loaded in {startupClock.ElapsedMilliseconds} ms; library={library.Count:N0}; queue={queue.Count:N0}");};
         Dispatcher.UnhandledException+=(_,e)=>{LogDiagnostic("ERROR","Unhandled UI exception: "+e.Exception);};
@@ -271,6 +298,7 @@ public partial class MainWindow : Window
                 double remaining=EffectiveEndSeconds()-player.Position.TotalSeconds;
                 if(remaining<=crossfadeSeconds)BeginCrossfade();
             }
+            CheckPreloadHealth();
             if(pendingStateSave&&!fading){pendingStateSave=false;SaveState();}
             UpdateFadeCountdown();UpdateWavePlayhead();Clock.Text=DateTime.Now.ToString("HH:mm:ss"); if(CurrentDurationSeconds()>0 && !stopped) NowTime.Text=$"{player.Position.ToString(@"mm\:ss")} / {TimeSpan.FromSeconds(CurrentDurationSeconds()).ToString(@"mm\:ss")}"; else NowTime.Text="00:00"; if(!stopped && player.NaturalDuration.HasTimeSpan) PlaybackProgress.Value=Math.Min(PlaybackProgress.Maximum,player.Position.TotalSeconds); };
         responsivenessTimer.Tick+=(_,_)=>{
@@ -297,7 +325,7 @@ public partial class MainWindow : Window
         for(int i=0;i<VisualTreeHelper.GetChildrenCount(root);i++){
             var child=VisualTreeHelper.GetChild(root,i);
             if(child is TextBlock label && label.Text.Contains("BROADCAST CONSOLE v2.2.1 BETA"))
-                label.Text=label.Text.Replace("v2.2.1 BETA","v3.1 BETA");
+                label.Text=label.Text.Replace("v2.2.1 BETA","v3.2 BETA");
             UpdateVersionLabels(child);
         }
     }
@@ -423,8 +451,15 @@ public partial class MainWindow : Window
         var role=ReferenceEquals(source,player)?"MAIN":"STANDBY";
         if(ReferenceEquals(source,player))consecutiveAudioFailures=0;
         if(ReferenceEquals(source,incomingPlayer))standbyRetryCount=0;
-        if(openRequests.Remove(source,out var request))
-            LogDiagnostic("AUDIO",$"{role} opened {System.IO.Path.GetFileName(request.path)} in {(DateTime.UtcNow-request.started).TotalMilliseconds:F0} ms");
+        if(openRequests.Remove(source,out var request)){
+            double elapsed=(DateTime.UtcNow-request.started).TotalMilliseconds;
+            LogDiagnostic("AUDIO",$"{role} opened {System.IO.Path.GetFileName(request.path)} in {elapsed:F0} ms");
+            if(elapsed>3000){
+                slowOpenTotal++;
+                slowOpenCounts[request.path]=slowOpenCounts.TryGetValue(request.path,out var n)?n+1:1;
+                LogDiagnostic("PRELOAD",$"SLOW OPEN: {role} · {System.IO.Path.GetFileName(request.path)} · {elapsed:F0} ms");
+            }
+        }
         else LogDiagnostic("AUDIO",$"{role} MediaOpened (no pending request)");
     }
     private void Player_MediaOpened(object? sender,EventArgs e) {
@@ -433,7 +468,10 @@ public partial class MainWindow : Window
                 PlaybackProgress.Maximum=Math.Max(1,player.NaturalDuration.TimeSpan.TotalSeconds);
                 UpdateFadeCountdown();
             }
-            if(ReferenceEquals(sender,incomingPlayer)&&preloadedPath!=null)preloadReady=true;
+            if(ReferenceEquals(sender,incomingPlayer)&&preloadedPath!=null){
+                preloadReady=true;preloadWarningPath=null;
+                LogDiagnostic("PRELOAD",$"READY {System.IO.Path.GetFileName(preloadedPath)} · elapsed={(DateTime.UtcNow-preloadStartedAt).TotalMilliseconds:F0} ms");
+            }
         });
     }
     private void Player_MediaEnded(object? sender,EventArgs e) {
@@ -453,14 +491,14 @@ public partial class MainWindow : Window
         int next=FindUpcomingIndex();
         string? path=next>=0?queue[next].Path:null;
         if(path==preloadedPath)return;
-        preloadedPath=null;preloadReady=false;
+        preloadedPath=null;preloadReady=false;preloadWarningPath=null;
         try {
             incomingPlayer.Stop();incomingPlayer.Close();
             if(path==null)return;
             incomingPlayer.Volume=0;
             TrackMediaOpen(incomingPlayer,path,"STANDBY");
-            incomingPlayer.Open(new Uri(path));
             preloadedPath=path;preloadStartedAt=DateTime.UtcNow;
+            incomingPlayer.Open(new Uri(path));
         } catch(Exception ex){preloadedPath=null;StatusText.Text="PRELOAD ERROR: "+ex.Message;}
     }
     private void BeginCrossfade() {
@@ -470,12 +508,15 @@ public partial class MainWindow : Window
         if(preloadedPath!=queue[next].Path){PreloadUpcoming();return;}
         if(!preloadReady){
             if((DateTime.UtcNow-preloadStartedAt).TotalSeconds>3)StatusText.Text="WAITING FOR NEXT AUDIO";
+            CheckPreloadHealth();
             return;
         }
         try {
             incomingPlayer.Volume=0;incomingPlayer.Play();outgoingFadeEnd=EffectiveEndSeconds();
             fadeStartPosition=player.Position.TotalSeconds;
             outgoingFadeDuration=Math.Max(0.1,outgoingFadeEnd-fadeStartPosition);
+            if(outgoingFadeDuration<0.5)
+                LogDiagnostic("CROSSFADE",$"SHORT TRACK: reduced fade to {outgoingFadeDuration:F2}s for {System.IO.Path.GetFileName(queue[activeIndex].Path)}");
             fadeElapsedSeconds=0;lastFadeClock=DateTime.UtcNow;
             crossfadeStartedUtc=DateTime.UtcNow;
             crossfadeFrom=activeIndex>=0&&activeIndex<queue.Count?queue[activeIndex].Display:"(unknown)";
