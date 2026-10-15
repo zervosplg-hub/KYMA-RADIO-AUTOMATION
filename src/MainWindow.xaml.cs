@@ -39,7 +39,11 @@ public partial class MainWindow : Window
     private DateTime lastHeartbeat = DateTime.UtcNow;
     private Window? diagnosticsWindow;
     private TextBox? diagnosticsText;
-    private DateTime playbackRequestedAt;
+    private readonly Dictionary<MediaPlayer,(DateTime started,string path)> openRequests = new();
+    private void TrackMediaOpen(MediaPlayer target,string path,string role) {
+        openRequests[target]=(DateTime.UtcNow,path);
+        LogDiagnostic("AUDIO",$"{role} OPEN requested: {System.IO.Path.GetFileName(path)}");
+    }
     private void LogDiagnostic(string category,string message) {
         var line=$"{DateTime.Now:HH:mm:ss.fff} [{category}] {message}";
         diagnosticLines.Add(line);
@@ -157,7 +161,7 @@ public partial class MainWindow : Window
             ContextMenu.Items.Add(debugMenu);
         }
         LogDiagnostic("STARTUP","UI initialized");
-        Title="KYMA RADIO AUTOMATION | SOHO Professional 2.8 BETA";
+        Title="KYMA RADIO AUTOMATION | SOHO Professional 2.8.1 BETA";
         EnableVirtualizedLists();
         Loaded += (_,_)=>{UpdateVersionLabels(this);LogDiagnostic("STARTUP",$"Window loaded in {startupClock.ElapsedMilliseconds} ms; library={library.Count:N0}; queue={queue.Count:N0}");};
         Dispatcher.UnhandledException+=(_,e)=>{LogDiagnostic("ERROR","Unhandled UI exception: "+e.Exception);};
@@ -165,7 +169,8 @@ public partial class MainWindow : Window
         incomingPlayer.MediaEnded += Player_MediaEnded;
         player.MediaFailed += (_,e)=>Dispatcher.BeginInvoke(() => { StatusText.Text="PLAYBACK ERROR: " + e.ErrorException.Message; stopped=true; });
         player.MediaOpened += Player_MediaOpened; incomingPlayer.MediaOpened += Player_MediaOpened;
-        player.MediaOpened+=(_,_)=>LogDiagnostic("AUDIO",$"Player opened in {(DateTime.UtcNow-playbackRequestedAt).TotalMilliseconds:F0} ms");
+        player.MediaOpened+=MediaOpenedDiagnostic;
+        incomingPlayer.MediaOpened+=MediaOpenedDiagnostic;
         player.MediaFailed+=(_,e)=>LogDiagnostic("ERROR","Playback: "+e.ErrorException);
         incomingPlayer.MediaFailed+=(_,e)=>LogDiagnostic("ERROR","Preload: "+e.ErrorException);
         incomingPlayer.MediaFailed += (_,e)=>Dispatcher.BeginInvoke(()=>{
@@ -199,7 +204,7 @@ public partial class MainWindow : Window
         for(int i=0;i<VisualTreeHelper.GetChildrenCount(root);i++){
             var child=VisualTreeHelper.GetChild(root,i);
             if(child is TextBlock label && label.Text.Contains("BROADCAST CONSOLE v2.2.1 BETA"))
-                label.Text=label.Text.Replace("v2.2.1 BETA","v2.8 BETA");
+                label.Text=label.Text.Replace("v2.2.1 BETA","v2.8.1 BETA");
             UpdateVersionLabels(child);
         }
     }
@@ -314,6 +319,13 @@ public partial class MainWindow : Window
     private void Stop_Click(object s,RoutedEventArgs e) => StopPlayback();
     private void StopPlayback() { incomingPlayer.Stop(); incomingPlayer.Close(); preloadedPath=null;preloadReady=false;fading=false;fadeElapsedSeconds=0; player.Volume=playbackVolume; player.Stop(); stopped=true; paused=false; PlaybackProgress.Value=0; NowTime.Text="00:00"; StatusText.Text="STOPPED"; }
     private void Next_Click(object s,RoutedEventArgs e) => NextTrack();
+    private void MediaOpenedDiagnostic(object? sender,EventArgs e) {
+        if(sender is not MediaPlayer source)return;
+        var role=ReferenceEquals(source,player)?"MAIN":"STANDBY";
+        if(openRequests.Remove(source,out var request))
+            LogDiagnostic("AUDIO",$"{role} opened {System.IO.Path.GetFileName(request.path)} in {(DateTime.UtcNow-request.started).TotalMilliseconds:F0} ms");
+        else LogDiagnostic("AUDIO",$"{role} MediaOpened (no pending request)");
+    }
     private void Player_MediaOpened(object? sender,EventArgs e) {
         Dispatcher.BeginInvoke(() => {
             if(ReferenceEquals(sender,player)&&player.NaturalDuration.HasTimeSpan){
@@ -345,6 +357,7 @@ public partial class MainWindow : Window
             incomingPlayer.Stop();incomingPlayer.Close();
             if(path==null)return;
             incomingPlayer.Volume=0;
+            TrackMediaOpen(incomingPlayer,path,"STANDBY");
             incomingPlayer.Open(new Uri(path));
             preloadedPath=path;preloadStartedAt=DateTime.UtcNow;
         } catch(Exception ex){preloadedPath=null;StatusText.Text="PRELOAD ERROR: "+ex.Message;}
@@ -418,6 +431,7 @@ public partial class MainWindow : Window
                 }
                 return result;
             });
+            LogDiagnostic("CLEAN",$"Disk scan finished in {cleanWatch.ElapsedMilliseconds} ms; {missing.Count:N0} missing; updating lists");
             int removed=0;
             for(int i=library.Count-1;i>=0;i--)
                 if(missing.Contains(library[i].Path)){
@@ -448,7 +462,7 @@ public partial class MainWindow : Window
         try{File.WriteAllLines(d.FileName,new[]{"Entry"}.Concat(history.Select(h=>"\""+h.Replace("\"","\"\"")+"\"")),System.Text.Encoding.UTF8);StatusText.Text="HISTORY EXPORTED";}
         catch(Exception ex){StatusText.Text="EXPORT ERROR: "+ex.Message;}
     }
-    private void StartAt(int index) { LogDiagnostic("AUDIO",$"StartAt index={index} queue={queue.Count}"); if(fading){incomingPlayer.Stop();incomingPlayer.Close();fading=false;fadeElapsedSeconds=0;player.Volume=playbackVolume;}preloadedPath=null;preloadReady=false; if(index<0||index>=queue.Count)return; var t=queue[index]; if(!File.Exists(t.Path)) { StatusText.Text="MISSING FILE: "+t.Path; return; } playbackRequestedAt=DateTime.UtcNow;player.Stop();player.Open(new Uri(t.Path));player.Play();activeIndex=index; stopped=false; paused=false; NowTitle.Text=t.Display; NowSub.Text=t.Path; QueueList.SelectedIndex=index; history.Insert(0,$"{DateTime.Now:HH:mm:ss}   {t.Display}"); if(history.Count>100)history.RemoveAt(history.Count-1); SaveState(); StatusText.Text="PLAYING"; PlaybackProgress.Value=0; UpdateNext(); DrawWave(NowWaveform,t.Path); }
+    private void StartAt(int index) { LogDiagnostic("AUDIO",$"StartAt index={index} queue={queue.Count}"); if(fading){incomingPlayer.Stop();incomingPlayer.Close();fading=false;fadeElapsedSeconds=0;player.Volume=playbackVolume;}preloadedPath=null;preloadReady=false; if(index<0||index>=queue.Count)return; var t=queue[index]; if(!File.Exists(t.Path)) { StatusText.Text="MISSING FILE: "+t.Path; return; } player.Stop();TrackMediaOpen(player,t.Path,"MAIN");player.Open(new Uri(t.Path));player.Play();activeIndex=index; stopped=false; paused=false; NowTitle.Text=t.Display; NowSub.Text=t.Path; QueueList.SelectedIndex=index; history.Insert(0,$"{DateTime.Now:HH:mm:ss}   {t.Display}"); if(history.Count>100)history.RemoveAt(history.Count-1); SaveState(); StatusText.Text="PLAYING"; PlaybackProgress.Value=0; UpdateNext(); DrawWave(NowWaveform,t.Path); }
     private void ConfigureAudioMenus() {
         var queueMenu=new ContextMenu();
         var setOut=new MenuItem{Header="Mix Out → τρέχουσα θέση αναπαραγωγής"};
