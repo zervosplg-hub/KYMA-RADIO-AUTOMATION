@@ -181,6 +181,126 @@ public partial class MainWindow : Window
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"KYMA_SOHO","PRO");
 
     // KYMA PRO offline scheduling: generates a real plan, never changes live playout.
+    // Dedicated SOHO-style library management, available directly from the broadcast console.
+    private void OpenMediaManager(string initialCategory="ALL"){
+        var w=new Window { Title="KYMA PRO | MUSIC & JINGLES MANAGER",Width=1050,Height=730,
+            MinWidth=760,MinHeight=470,Owner=this,WindowStartupLocation=WindowStartupLocation.CenterOwner,
+            Background=new SolidColorBrush(Color.FromRgb(17,25,36)),Foreground=Brushes.White };
+        var root=new DockPanel { Margin=new Thickness(14) };
+        var header=new TextBlock { Text="MEDIA MANAGER  ·  MUSIC / JINGLES / SPOTS",
+            FontSize=20,FontWeight=FontWeights.Bold,Margin=new Thickness(0,0,0,12) };
+        DockPanel.SetDock(header,Dock.Top);root.Children.Add(header);
+        var toolbar=new WrapPanel { Margin=new Thickness(0,0,0,8) };
+        var search=new TextBox { Width=300,Margin=new Thickness(0,0,10,0),ToolTip="Artist, title or filename" };
+        var categories=new ComboBox { Width=130,Margin=new Thickness(0,0,10,0) };
+        foreach(var cat in new[]{"ALL","MUSIC","JINGLES","SPOTS"})categories.Items.Add(cat);
+        categories.SelectedItem=initialCategory;
+        var count=new TextBlock { VerticalAlignment=VerticalAlignment.Center,Foreground=Brushes.LightBlue };
+        toolbar.Children.Add(search);toolbar.Children.Add(categories);toolbar.Children.Add(count);
+        DockPanel.SetDock(toolbar,Dock.Top);root.Children.Add(toolbar);
+        var actions=new WrapPanel { Margin=new Thickness(0,0,0,10) };
+        DockPanel.SetDock(actions,Dock.Bottom);root.Children.Add(actions);
+        var list=new ListBox { DisplayMemberPath="Display",SelectionMode=SelectionMode.Single };
+        root.Children.Add(list);
+        w.Content=root;
+        var visible=new FastTrackCollection();
+        list.ItemsSource=visible;
+        void Refresh(){
+            string term=search.Text.Trim();
+            string selected=categories.SelectedItem as string??"ALL";
+            string? selectedPath=(list.SelectedItem as Track)?.Path;
+            var rows=library.Where(t=>(selected=="ALL"||GetMediaCategory(t.Path)==selected)&&
+                (term.Length==0||t.SearchText.Contains(term,StringComparison.OrdinalIgnoreCase))).ToArray();
+            visible.ReplaceAll(rows);
+            if(selectedPath!=null)list.SelectedItem=rows.FirstOrDefault(t=>t.Path==selectedPath);
+            count.Text=rows.Length.ToString("N0")+" / "+library.Count.ToString("N0")+" files";
+        }
+        void Button(string label,Action action){
+            var b=new Button { Content=label,Padding=new Thickness(12,9,12,9),Margin=new Thickness(0,0,7,6),
+                Background=new SolidColorBrush(Color.FromRgb(40,77,108)),Foreground=Brushes.White };
+            b.Click+=(_,_)=>{try{action();}catch(Exception ex){MessageBox.Show(ex.Message,"KYMA PRO");}};
+            actions.Children.Add(b);
+        }
+        foreach(var cat in new[]{"MUSIC","JINGLES","SPOTS"}){
+            string target=cat;
+            Button("SET "+target,()=>{if(list.SelectedItem is Track t){SetMediaCategory(t,target);Refresh();}});
+        }
+        Button("ADD TO PLAYLIST",()=>{
+            if(list.SelectedItem is not Track t)return;
+            if(preventQueueDuplicates&&queue.Any(x=>string.Equals(x.Path,t.Path,StringComparison.OrdinalIgnoreCase))){
+                StatusText.Text="TRACK ALREADY IN PLAYLIST";return;
+            }
+            queue.Add(t);UpdateNext();SaveState();
+        });
+        Button("FILE DETAILS",()=>{
+            if(list.SelectedItem is not Track t)return;
+            var file=new FileInfo(t.Path);
+            string details="Title: "+t.Display+"\nCategory: "+GetMediaCategory(t.Path)+
+                "\nPath: "+t.Path+"\nExists: "+file.Exists+
+                (file.Exists?"\nSize: "+file.Length.ToString("N0")+" bytes":"")+
+                (decodedDurations.TryGetValue(t.Path,out var duration)?"\nDuration: "+TimeSpan.FromSeconds(duration).ToString(@"hh\:mm\:ss"):"\nDuration: not analyzed");
+            MessageBox.Show(details,"KYMA | FILE DETAILS");
+        });
+        Button("REFRESH",Refresh);
+        search.TextChanged+=(_,_)=>Refresh();
+        categories.SelectionChanged+=(_,_)=>Refresh();
+        Refresh();w.Show();
+    }
+    private void OpenProDocumentManager(string document,string title,string template){
+        Directory.CreateDirectory(proDataDirectory);
+        var w=new Window { Title="KYMA PRO | "+title,Width=920,Height=660,MinWidth=600,MinHeight=400,
+            Owner=this,WindowStartupLocation=WindowStartupLocation.CenterOwner,
+            Background=new SolidColorBrush(Color.FromRgb(17,25,36)),Foreground=Brushes.White };
+        var root=new DockPanel { Margin=new Thickness(14) };
+        var label=new TextBlock { Text=title,FontSize=20,FontWeight=FontWeights.Bold,Margin=new Thickness(0,0,0,8) };
+        DockPanel.SetDock(label,Dock.Top);root.Children.Add(label);
+        var note=new TextBlock { Text="Διαχείριση δεδομένων PRO. Τα στοιχεία αποθηκεύονται τοπικά και δεν προγραμματίζουν αυτόματα μετάδοση.",
+            Foreground=Brushes.LightBlue,TextWrapping=TextWrapping.Wrap,Margin=new Thickness(0,0,0,8) };
+        DockPanel.SetDock(note,Dock.Top);root.Children.Add(note);
+        var save=new Button { Content="SAVE",Padding=new Thickness(16,9,16,9),HorizontalAlignment=HorizontalAlignment.Left };
+        DockPanel.SetDock(save,Dock.Bottom);root.Children.Add(save);
+        string file=System.IO.Path.Combine(proDataDirectory,document+".txt");
+        var editor=new TextBox { AcceptsReturn=true,AcceptsTab=true,
+            VerticalScrollBarVisibility=ScrollBarVisibility.Auto,HorizontalScrollBarVisibility=ScrollBarVisibility.Auto,
+            FontFamily=new FontFamily("Consolas"),FontSize=13,Text=File.Exists(file)?File.ReadAllText(file):template };
+        root.Children.Add(editor);w.Content=root;
+        save.Click+=(_,_)=>{
+            try{
+                string temp=file+".tmp";File.WriteAllText(temp,editor.Text,Encoding.UTF8);File.Move(temp,file,true);
+                StatusText.Text="PRO SAVED: "+document;MessageBox.Show("Αποθηκεύτηκε: "+document,"KYMA PRO");
+            }catch(Exception ex){MessageBox.Show(ex.Message,"KYMA PRO");}
+        };
+        w.Show();
+    }
+    private void AddProMainMenu(){
+        // Insert a compact navigation bar into the library header, without changing the playout layout.
+        var libraryGrid=System.Windows.Media.VisualTreeHelper.GetParent(LibraryList) as Grid;
+        if(libraryGrid==null)return;
+        var outer=System.Windows.Media.VisualTreeHelper.GetParent(libraryGrid) as Grid;
+        if(outer==null)return;
+        var header=outer.Children.OfType<Border>().FirstOrDefault(x=>Grid.GetRow(x)==0);
+        if(header==null)return;
+        var bar=new DockPanel { LastChildFill=true };
+        var heading=new TextBlock { Text="LIBRARY / PRO",FontWeight=FontWeights.Bold,FontSize=13,
+            VerticalAlignment=VerticalAlignment.Center,Margin=new Thickness(0,0,10,0) };
+        DockPanel.SetDock(heading,Dock.Left);bar.Children.Add(heading);
+        var menu=new WrapPanel { HorizontalAlignment=HorizontalAlignment.Right };
+        void Nav(string label,Action action){
+            var button=new Button { Content=label,FontSize=10,Padding=new Thickness(7,4,7,4),
+                Margin=new Thickness(2,0,2,0) };
+            button.Click+=(_,_)=>action();menu.Children.Add(button);
+        }
+        Nav("MUSIC",()=>OpenMediaManager("MUSIC"));
+        Nav("JINGLES",()=>OpenMediaManager("JINGLES"));
+        Nav("SPOTS",()=>OpenMediaManager("SPOTS"));
+        Nav("COMMERCIALS",()=>OpenProDocumentManager("CAMPAIGNS","COMMERCIAL CAMPAIGNS",
+            "# client,spot,start_date,end_date,plays_per_day\n"));
+        Nav("SCHEDULER",OpenProScheduler);
+        Nav("FINAL LOG",()=>OpenProDocumentManager("FINAL_LOG_LAST","LAST SAVED FINAL LOG",
+            "# Generate and save a Final Log using SCHEDULER first.\n"));
+        DockPanel.SetDock(menu,Dock.Right);bar.Children.Add(menu);
+        header.Child=bar;
+    }
     private void OpenProScheduler(){
         var w=new Window { Title="KYMA PRO | MUSIC SCHEDULER / FINAL LOG",
             Width=1030,Height=700,MinWidth=700,MinHeight=470,Owner=this,
@@ -744,7 +864,7 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
-        QueueList.ItemsSource = queue; LibraryList.ItemsSource = filtered; LibraryListA.ItemsSource = filteredMusic; LibraryListB.ItemsSource = filteredJingles; ConfigureLibraryCategories(); HistoryList.ItemsSource = history;
+        QueueList.ItemsSource = queue; LibraryList.ItemsSource = filtered; LibraryListA.ItemsSource = filteredMusic; LibraryListB.ItemsSource = filteredJingles; ConfigureLibraryCategories(); HistoryList.ItemsSource = history; AddProMainMenu();
         for (int i=0;i<9;i++) { var n=i; var b=new Button { Content=$"CART {i+1}", Background=new SolidColorBrush(Color.FromRgb((byte)(65+i*10),(byte)(37+i*6),(byte)(61+i*4))), Tag=i, FontSize=14, FontWeight=FontWeights.Bold, Foreground=Brushes.White, BorderBrush=new SolidColorBrush(Color.FromRgb(85,112,143)), BorderThickness=new Thickness(1), Margin=new Thickness(3), ToolTip="Αριστερό κλικ: PLAY · Δεξί κλικ: φόρτωση Cart" }; b.Click += (_,_)=> { if(Keyboard.Modifiers.HasFlag(ModifierKeys.Shift))StopSingleCart(n);else PlayCart(n); }; b.MouseRightButtonUp += (_,_)=>AssignCart(n); CartGrid.Children.Add(b); cartPlayers[n].MediaEnded += (_,_)=>Dispatcher.BeginInvoke(()=>UpdateCartPad(n,false)); }
         searchDebounce.Tick += (_,_) => { searchDebounce.Stop(); RefreshLibrary(); };
         saveDebounce.Tick += (_,_)=>{saveDebounce.Stop();if(fading){pendingStateSave=true;return;}FlushState();};
