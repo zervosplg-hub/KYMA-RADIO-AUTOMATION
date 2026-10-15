@@ -182,6 +182,73 @@ public partial class MainWindow : Window
 
     // KYMA PRO offline scheduling: generates a real plan, never changes live playout.
     // Dedicated SOHO-style library management, available directly from the broadcast console.
+    private sealed class MediaDetails {
+        public string Artist {get;set;}="";
+        public string Title {get;set;}="";
+        public string Album {get;set;}="";
+        public string Notes {get;set;}="";
+    }
+    private string MediaDetailsFolder => System.IO.Path.Combine(proDataDirectory,"MEDIA_DETAILS");
+    private string MediaDetailsPath(string path){
+        var hash=System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(path.ToUpperInvariant()));
+        return System.IO.Path.Combine(MediaDetailsFolder,Convert.ToHexString(hash)+".json");
+    }
+    private void EditMediaDetails(Track track){
+        string file=MediaDetailsPath(track.Path);
+        MediaDetails details;
+        try{details=File.Exists(file)?JsonSerializer.Deserialize<MediaDetails>(File.ReadAllText(file))??new MediaDetails():new MediaDetails();}
+        catch(Exception ex){MessageBox.Show("Metadata read: "+ex.Message,"KYMA PRO");return;}
+        var w=new Window {Title="KYMA PRO | TRACK EDITOR",Width=740,Height=540,MinWidth=520,MinHeight=400,
+            Owner=this,WindowStartupLocation=WindowStartupLocation.CenterOwner,
+            Background=new SolidColorBrush(Color.FromRgb(17,25,36)),Foreground=Brushes.White};
+        var root=new DockPanel {Margin=new Thickness(16)};
+        var header=new TextBlock{Text=track.Display,FontSize=18,FontWeight=FontWeights.Bold,
+            TextTrimming=TextTrimming.CharacterEllipsis,Margin=new Thickness(0,0,0,10)};
+        DockPanel.SetDock(header,Dock.Top);root.Children.Add(header);
+        var footer=new WrapPanel {Margin=new Thickness(0,10,0,0)};
+        DockPanel.SetDock(footer,Dock.Bottom);root.Children.Add(footer);
+        var fields=new StackPanel();
+        var scroll=new ScrollViewer {VerticalScrollBarVisibility=ScrollBarVisibility.Auto,Content=fields};
+        root.Children.Add(scroll);w.Content=root;
+        TextBox Field(string caption,string value){
+            fields.Children.Add(new TextBlock{Text=caption,Foreground=Brushes.LightBlue,Margin=new Thickness(0,9,0,3)});
+            var tb=new TextBox{Text=value,MinHeight=32};fields.Children.Add(tb);return tb;
+        }
+        string filename=track.Display;
+        var pieces=filename.Split(new[]{" - "," – "},2,StringSplitOptions.None);
+        var artist=Field("ARTIST",details.Artist.Length>0?details.Artist:(pieces.Length==2?pieces[0]:""));
+        var title=Field("TITLE",details.Title.Length>0?details.Title:(pieces.Length==2?pieces[1]:filename));
+        var album=Field("ALBUM",details.Album);
+        var notes=Field("NOTES",details.Notes);
+        fields.Children.Add(new TextBlock{Text="FILE: "+track.Path,TextWrapping=TextWrapping.Wrap,
+            Foreground=Brushes.Gray,Margin=new Thickness(0,12,0,0)});
+        var preview=new MediaPlayer();
+        bool previewOpened=false;
+        var play=new Button{Content="▶ PREVIEW",Margin=new Thickness(0,0,8,0)};
+        var stop=new Button{Content="■ STOP",Margin=new Thickness(0,0,8,0)};
+        var save=new Button{Content="SAVE METADATA",Background=new SolidColorBrush(Color.FromRgb(29,115,89))};
+        footer.Children.Add(play);footer.Children.Add(stop);footer.Children.Add(save);
+        play.Click+=(_,_)=>{
+            try{
+                if(!File.Exists(track.Path)){MessageBox.Show("Το αρχείο δεν υπάρχει.","KYMA");return;}
+                if(!previewOpened){preview.Open(new Uri(track.Path));preview.Volume=0.65;previewOpened=true;}
+                preview.Play();
+            }catch(Exception ex){MessageBox.Show(ex.Message,"Preview");}
+        };
+        stop.Click+=(_,_)=>preview.Stop();
+        save.Click+=(_,_)=>{
+            try{
+                Directory.CreateDirectory(MediaDetailsFolder);
+                var value=new MediaDetails{Artist=artist.Text.Trim(),Title=title.Text.Trim(),
+                    Album=album.Text.Trim(),Notes=notes.Text.Trim()};
+                string temp=file+".tmp";
+                File.WriteAllText(temp,JsonSerializer.Serialize(value,new JsonSerializerOptions{WriteIndented=true}),Encoding.UTF8);
+                File.Move(temp,file,true);StatusText.Text="METADATA SAVED: "+track.Display;w.Close();
+            }catch(Exception ex){MessageBox.Show(ex.Message,"KYMA PRO");}
+        };
+        w.Closed+=(_,_)=>{preview.Stop();preview.Close();};
+        w.Show();
+    }
     private void OpenMediaManager(string initialCategory="ALL"){
         var w=new Window { Title="KYMA PRO | MUSIC & JINGLES MANAGER",Width=1050,Height=730,
             MinWidth=760,MinHeight=470,Owner=this,WindowStartupLocation=WindowStartupLocation.CenterOwner,
@@ -232,6 +299,8 @@ public partial class MainWindow : Window
             }
             queue.Add(t);UpdateNext();SaveState();
         });
+        Button("EDIT TRACK",()=>{if(list.SelectedItem is Track t)EditMediaDetails(t);});
+        list.MouseDoubleClick+=(_,_)=>{if(list.SelectedItem is Track t)EditMediaDetails(t);};
         Button("FILE DETAILS",()=>{
             if(list.SelectedItem is not Track t)return;
             var file=new FileInfo(t.Path);
