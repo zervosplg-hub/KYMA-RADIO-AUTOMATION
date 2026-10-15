@@ -161,7 +161,7 @@ public partial class MainWindow : Window
             ContextMenu.Items.Add(debugMenu);
         }
         LogDiagnostic("STARTUP","UI initialized");
-        Title="KYMA RADIO AUTOMATION | SOHO Professional 2.8.1 BETA";
+        Title="KYMA RADIO AUTOMATION | SOHO Professional 2.8.2 BETA";
         EnableVirtualizedLists();
         Loaded += (_,_)=>{UpdateVersionLabels(this);LogDiagnostic("STARTUP",$"Window loaded in {startupClock.ElapsedMilliseconds} ms; library={library.Count:N0}; queue={queue.Count:N0}");};
         Dispatcher.UnhandledException+=(_,e)=>{LogDiagnostic("ERROR","Unhandled UI exception: "+e.Exception);};
@@ -204,7 +204,7 @@ public partial class MainWindow : Window
         for(int i=0;i<VisualTreeHelper.GetChildrenCount(root);i++){
             var child=VisualTreeHelper.GetChild(root,i);
             if(child is TextBlock label && label.Text.Contains("BROADCAST CONSOLE v2.2.1 BETA"))
-                label.Text=label.Text.Replace("v2.2.1 BETA","v2.8.1 BETA");
+                label.Text=label.Text.Replace("v2.2.1 BETA","v2.8.2 BETA");
             UpdateVersionLabels(child);
         }
     }
@@ -417,37 +417,51 @@ public partial class MainWindow : Window
     private bool cleaningLibrary = false;
     private async void RemoveMissing_Click(object s,RoutedEventArgs e) {
         if(cleaningLibrary)return;
-        cleaningLibrary=true;var cleanWatch=Stopwatch.StartNew();LogDiagnostic("CLEAN","Missing file scan started");
+        cleaningLibrary=true;
+        var watch=Stopwatch.StartNew();
+        LogDiagnostic("CLEAN","Missing file scan started");
         StatusText.Text="CLEAN: έλεγχος αρχείων στο παρασκήνιο...";
         try {
-            // Check disk/network paths away from the WPF UI thread.
             var paths=library.Select(t=>t.Path).Concat(queue.Select(t=>t.Path))
                 .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+            int checkedCount=0;
+            string currentPath="";
+            var progress=new Progress<(int count,string path)>(p=>{
+                checkedCount=p.count;currentPath=p.path;
+                StatusText.Text=$"CLEAN: {p.count:N0}/{paths.Length:N0} · {watch.Elapsed:mm\\:ss}";
+                if(p.count%1000==0||p.count==paths.Length)
+                    LogDiagnostic("CLEAN",$"Progress {p.count:N0}/{paths.Length:N0} in {watch.Elapsed:mm\\:ss}; last={p.path}");
+            });
             var missing=await Task.Run(()=>{
                 var result=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                foreach(var path in paths){
-                    try { if(!File.Exists(path))result.Add(path); }
-                    catch { result.Add(path); }
+                for(int i=0;i<paths.Length;i++){
+                    var file=paths[i];
+                    try {if(!File.Exists(file))result.Add(file);}
+                    catch {result.Add(file);}
+                    if((i+1)%250==0||i==paths.Length-1)progress.Report((i+1,file));
                 }
                 return result;
             });
-            LogDiagnostic("CLEAN",$"Disk scan finished in {cleanWatch.ElapsedMilliseconds} ms; {missing.Count:N0} missing; updating lists");
-            int removed=0;
-            for(int i=library.Count-1;i>=0;i--)
-                if(missing.Contains(library[i].Path)){
-                    libraryPaths.Remove(library[i].Path);
-                    library.RemoveAt(i);
-                    removed++;
-                }
+            LogDiagnostic("CLEAN",$"Disk scan finished in {watch.ElapsedMilliseconds} ms; {missing.Count:N0} missing; updating lists");
+            var kept=library.Where(t=>!missing.Contains(t.Path)).ToArray();
+            int removed=library.Count-kept.Length;
+            if(removed>0){
+                library.Clear();
+                foreach(var track in kept)library.Add(track);
+                libraryPaths.Clear();
+                foreach(var track in kept)libraryPaths.Add(track.Path);
+            }
             for(int i=queue.Count-1;i>=0;i--)
                 if(missing.Contains(queue[i].Path)){
                     if(i==activeIndex){StopPlayback();activeIndex=-1;}
                     else if(i<activeIndex)activeIndex--;
                     queue.RemoveAt(i);
                 }
-            RefreshLibrary();UpdateNext();
+            if(removed>0)RefreshLibrary();
+            UpdateNext();
             if(removed>0||missing.Count>0)SaveState();
-            StatusText.Text=$"CLEAN OK: {removed:N0} αρχεία αφαιρέθηκαν · {paths.Length:N0} ελέγχθηκαν";LogDiagnostic("CLEAN",$"{paths.Length:N0} checked, {removed:N0} removed in {cleanWatch.ElapsedMilliseconds} ms");
+            StatusText.Text=$"CLEAN OK: {removed:N0} αρχεία αφαιρέθηκαν · {paths.Length:N0} ελέγχθηκαν";
+            LogDiagnostic("CLEAN",$"Completed {paths.Length:N0} checks, removed {removed:N0} in {watch.Elapsed:mm\\:ss}");
         } catch(Exception ex){StatusText.Text="CLEAN ERROR: "+ex.Message;LogDiagnostic("ERROR","Clean: "+ex);}
         finally{cleaningLibrary=false;}
     }
