@@ -116,6 +116,12 @@ public partial class MainWindow : Window
             if(next>=0)DiagnoseSlowNasFile(queue[next].Path,0);
             else LogDiagnostic("NAS","No upcoming track to test");
         });
+        Action("BROADCAST REPORT",()=>{
+            RecordMemorySample();
+            LogDiagnostic("BROADCAST REPORT",$"Crossfades={completedCrossfades} · short jingles={shortJingleTransitions} · preload ready={preloadReadyCount} · avg preload={(preloadReadyCount>0?preloadTotalMs/preloadReadyCount:0):F0}ms · slow opens={slowOpenTotal}");
+            LogDiagnostic("BROADCAST REPORT",$"UI lag events >=250ms={uiLagEvents} · worst={worstUiLagMs:F0}ms · main recoveries={mainRecoveryAttempts} · standby retries={standbyRecoveryAttempts} · preload warnings={preloadWaitWarnings}");
+            LogDiagnostic("BROADCAST REPORT",$"RAM={lastMemoryMb}MB · peak={peakMemoryMb}MB · skipped missing checks={skippedMissingFiles} · playback={(stopped?"STOPPED":paused?"PAUSED":"ACTIVE")}");
+        });
         Action("PRELOAD STATS",()=>{
             LogDiagnostic("PRELOAD STATS",$"Ready={preloadReadyCount} · average={(preloadReadyCount>0?preloadTotalMs/preloadReadyCount:0):F0}ms · max={preloadMaxMs:F0}ms · warnings={preloadWaitWarnings} · missing checks={skippedMissingFiles}");
         });
@@ -212,6 +218,11 @@ public partial class MainWindow : Window
     private double preloadTotalMs=0;
     private double preloadMaxMs=0;
     private int skippedMissingFiles=0;
+    private int uiLagEvents=0;
+    private double worstUiLagMs=0;
+    private int shortJingleTransitions=0;
+    private int mainRecoveryAttempts=0;
+    private int standbyRecoveryAttempts=0;
     private DateTime lastMissingLogUtc=DateTime.MinValue;
     private bool shortTrackWarningIssued=false;
     private void CheckPreloadHealth(){
@@ -224,7 +235,9 @@ public partial class MainWindow : Window
         bool pending=string.Equals(preloadedPath,path,StringComparison.OrdinalIgnoreCase);
         if(pending&&preloadReady){preloadWarningPath=null;return;}
         // Very short jingles cannot preload until the previous fade completes.
-        if(remaining<=Math.Max(12,crossfadeSeconds+8) &&
+        double typicalOpenSeconds=preloadReadyCount>0?preloadTotalMs/preloadReadyCount/1000.0:1.5;
+        double warningWindow=Math.Max(12,Math.Max(crossfadeSeconds+8,Math.Min(20,typicalOpenSeconds*3+crossfadeSeconds)));
+        if(remaining<=warningWindow &&
            !(CurrentDurationSeconds()<5 && pending && (DateTime.UtcNow-preloadStartedAt).TotalSeconds<2) &&
            (preloadWarningPath!=path||(DateTime.UtcNow-lastPreloadWarningUtc).TotalSeconds>=15)){
             preloadWarningPath=path;lastPreloadWarningUtc=DateTime.UtcNow;preloadWaitWarnings++;
@@ -295,7 +308,7 @@ public partial class MainWindow : Window
             ContextMenu.Items.Add(debugMenu);
         }
         LogDiagnostic("STARTUP","UI initialized");
-        Title="KYMA RADIO AUTOMATION | SOHO Professional 3.4 BETA";
+        Title="KYMA RADIO AUTOMATION | SOHO Professional 3.5 BETA";
         EnableVirtualizedLists();
         Loaded += (_,_)=>{UpdateVersionLabels(this);LogDiagnostic("STARTUP",$"Window loaded in {startupClock.ElapsedMilliseconds} ms; library={library.Count:N0}; queue={queue.Count:N0}");};
         Dispatcher.UnhandledException+=(_,e)=>{LogDiagnostic("ERROR","Unhandled UI exception: "+e.Exception);};
@@ -307,7 +320,8 @@ public partial class MainWindow : Window
             StatusText.Text="PLAYBACK ERROR: "+e.ErrorException.Message;
             if(auto && !stopped && consecutiveAudioFailures<3){
                 consecutiveAudioFailures++;
-                LogDiagnostic("RECOVERY",$"MAIN failed; skip to next (attempt {consecutiveAudioFailures}/3)");
+                mainRecoveryAttempts++;
+                LogDiagnostic("RECOVERY",$"MAIN failed; skip to next (attempt {consecutiveAudioFailures}/3, total={mainRecoveryAttempts})");
                 NextTrack();
             }else {stopped=true;LogDiagnostic("ERROR","MAIN stopped after playback failure");}
         });
@@ -325,7 +339,8 @@ public partial class MainWindow : Window
                 if(failedPath!=lastStandbyFailedPath){lastStandbyFailedPath=failedPath;standbyRetryCount=0;}
                 if(auto&&!stopped&&standbyRetryCount<1){
                     standbyRetryCount++;
-                    LogDiagnostic("RECOVERY","Standby retry scheduled once");
+                    standbyRecoveryAttempts++;
+                    LogDiagnostic("RECOVERY",$"Standby retry scheduled once · total={standbyRecoveryAttempts} · file={System.IO.Path.GetFileName(failedPath)}");
                     var retryTimer=new DispatcherTimer {Interval=TimeSpan.FromSeconds(2)};
                     retryTimer.Tick+=(_,_)=>{
                         retryTimer.Stop();
@@ -351,6 +366,12 @@ public partial class MainWindow : Window
             UpdateFadeCountdown();UpdateWavePlayhead();Clock.Text=DateTime.Now.ToString("HH:mm:ss"); if(CurrentDurationSeconds()>0 && !stopped) NowTime.Text=$"{player.Position.ToString(@"mm\:ss")} / {TimeSpan.FromSeconds(CurrentDurationSeconds()).ToString(@"mm\:ss")}"; else NowTime.Text="00:00"; if(!stopped && player.NaturalDuration.HasTimeSpan) PlaybackProgress.Value=Math.Min(PlaybackProgress.Maximum,player.Position.TotalSeconds); };
         responsivenessTimer.Tick+=(_,_)=>{
             var now=DateTime.UtcNow;var gap=(now-lastHeartbeat).TotalMilliseconds;
+            double lagMs=Math.Max(0,gap-1000);
+            if(lagMs>=250){
+                uiLagEvents++;
+                worstUiLagMs=Math.Max(worstUiLagMs,lagMs);
+                LogDiagnostic("UI",$"Lag event #{uiLagEvents}: {lagMs:F0}ms · audio={(stopped?"STOPPED":"ACTIVE")}");
+            }
             if(gap>2300)LogDiagnostic("UI",$"Dispatcher delayed {gap:F0} ms");
             if((now-lastPerformanceLog).TotalSeconds>=10){
                 diagnosticsProcess.Refresh();
@@ -373,7 +394,7 @@ public partial class MainWindow : Window
         for(int i=0;i<VisualTreeHelper.GetChildrenCount(root);i++){
             var child=VisualTreeHelper.GetChild(root,i);
             if(child is TextBlock label && label.Text.Contains("BROADCAST CONSOLE v2.2.1 BETA"))
-                label.Text=label.Text.Replace("v2.2.1 BETA","v3.4 BETA");
+                label.Text=label.Text.Replace("v2.2.1 BETA","v3.5 BETA");
             UpdateVersionLabels(child);
         }
     }
@@ -579,8 +600,10 @@ public partial class MainWindow : Window
             incomingPlayer.Volume=0;incomingPlayer.Play();outgoingFadeEnd=EffectiveEndSeconds();
             fadeStartPosition=player.Position.TotalSeconds;
             outgoingFadeDuration=Math.Max(0.1,outgoingFadeEnd-fadeStartPosition);
-            if(outgoingFadeDuration<0.5)
-                LogDiagnostic("CROSSFADE",$"SHORT TRACK: reduced fade to {outgoingFadeDuration:F2}s for {System.IO.Path.GetFileName(queue[activeIndex].Path)}");
+            if(outgoingFadeDuration<0.5){
+                shortJingleTransitions++;
+                LogDiagnostic("CROSSFADE",$"SHORT TRACK #{shortJingleTransitions}: reduced fade to {outgoingFadeDuration:F2}s for {System.IO.Path.GetFileName(queue[activeIndex].Path)}");
+            }
             fadeElapsedSeconds=0;lastFadeClock=DateTime.UtcNow;
             crossfadeStartedUtc=DateTime.UtcNow;
             crossfadeFrom=activeIndex>=0&&activeIndex<queue.Count?queue[activeIndex].Display:"(unknown)";
